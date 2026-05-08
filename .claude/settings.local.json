@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pdftotext \"D:/Willing/Study/Course/final/sym/paper/Physics Informed Neural Network for Option Pricing.pdf\" -)",
+      "Bash(pdftotext \"D:/Willing/Study/Course/final/sym/paper/Option Pricing with Physics-informed Neural  Networks.pdf\" -)",
+      "Bash(pdftotext \"D:/Willing/Study/Course/final/sym/paper/Physics-Informed Neural Networks and Option Pricing.pdf\" -)",
+      "Bash(pdftotext \"D:/Willing/Study/Course/final/sym/paper/Improved constrained physics-informed neural networks \\(ICPINNs\\) to solve PDE and its application to option pricing.pdf\" -)"
+    ]
+  },
+  "outputStyle": "Explanatory"
+}
