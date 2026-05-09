@@ -75,6 +75,76 @@ Heston 模型输入维度为 3（$S, v, t$），采用 6 层全连接网络，�
 使各输入均落在 $[0, 1]$ 区间，避免不同量级的输入导致梯度不平衡。
 
 % ─────────────────────────────────────────────────────────────────────────────
+\section{波动率、隐含波动率与希腊字母}\label{sec:greeks}
+
+\subsection{历史波动率与隐含波动率}
+
+\textbf{历史波动率}（Historical Volatility，HV）是标的资产对数收益率的样本标准差，反映过去一段时间内价格的实际波动幅度：
+\begin{equation}
+  \sigma_\text{HV} = \sqrt{\frac{252}{n-1}\sum_{i=1}^{n}\left(\ln\frac{S_i}{S_{i-1}} - \bar{\mu}\right)^2},
+\end{equation}
+其中 252 为年化因子（交易日数），$\bar{\mu}$ 为样本均值。历史波动率是向后看的（backward-looking），只能描述已发生的价格变动。
+
+\textbf{隐含波动率}（Implied Volatility，IV）是使 BSM 模型价格等于市场观测价格时，反推得到的波动率参数：
+\begin{equation}\label{eq:iv}
+  \sigma_\text{IV} = \text{BSM}^{-1}(V^\text{mkt};\, S, K, T, r),
+\end{equation}
+即求解方程 $V_\text{BS}(S, K, T, r, \sigma) = V^\text{mkt}$ 中的 $\sigma$。隐含波动率是向前看的（forward-looking），反映市场对未来波动率的预期，是期权市场的核心报价语言。
+
+实践中，同一标的不同行权价和到期日的期权往往对应不同的隐含波动率，形成\textbf{波动率微笑}（Volatility Smile）或\textbf{波动率偏斜}（Volatility Skew）。BSM 假设常数波动率，无法解释这一现象；CEV 和 Heston 模型正是为此而设计。
+
+\subsection{希腊字母}
+
+期权的\textbf{希腊字母}（Greeks）描述期权价格对各市场参数的敏感度，是风险管理和对冲的核心工具。主要希腊字母定义如下：
+
+\begin{align}
+  \Delta &= \frac{\partial V}{\partial S}, \label{eq:delta} \\
+  \Gamma &= \frac{\partial^2 V}{\partial S^2}, \label{eq:gamma} \\
+  \Theta &= \frac{\partial V}{\partial t}, \label{eq:theta} \\
+  \mathcal{V} &= \frac{\partial V}{\partial \sigma}, \label{eq:vega} \\
+  \rho_r &= \frac{\partial V}{\partial r}. \label{eq:rho_r}
+\end{align}
+
+各希腊字母的经济含义与 BSM 解析表达式汇总于表~\ref{tab:greeks}。
+
+\begin{table}[htbp]
+  \centering
+  \caption{主要希腊字母的定义、含义与 BSM 解析式（欧式看涨期权）}
+  \label{tab:greeks}
+  \begin{tabular}{clll}
+    \hline
+    符号 & 定义 & 经济含义 & BSM 解析式 \\
+    \hline
+    $\Delta$ & $\partial V/\partial S$ & 股价变动 \$1 时期权价格变动量 & $\Phi(d_1)$ \\
+    $\Gamma$ & $\partial^2 V/\partial S^2$ & Delta 对股价的变化率 & $\phi(d_1)/(S\sigma\sqrt{T})$ \\
+    $\Theta$ & $\partial V/\partial t$ & 时间流逝对期权价值的侵蚀 & $-S\phi(d_1)\sigma/(2\sqrt{T}) - rKe^{-rT}\Phi(d_2)$ \\
+    $\mathcal{V}$ & $\partial V/\partial \sigma$ & 波动率变动 1\% 时价格变动量 & $S\phi(d_1)\sqrt{T}$ \\
+    $\rho_r$ & $\partial V/\partial r$ & 利率变动 1\% 时价格变动量 & $KTe^{-rT}\Phi(d_2)$ \\
+    \hline
+  \end{tabular}
+\end{table}
+
+其中 $\phi(\cdot)$ 为标准正态密度函数，$\Phi(\cdot)$ 为标准正态分布函数，$d_1, d_2$ 的定义见式~\eqref{eq:bs_d1}。
+
+\subsection{Heston 模型下希腊字母的高效计算}
+
+BSM 模型的希腊字母均有闭合解析式，计算代价极低。对于 CEV 模型，一般需要数值微分（有限差分）。Heston 模型的优势在于：其特征函数方法允许对 $S$、$v_0$、$r$ 等参数\textbf{解析求导}，从而一次积分同时得到多个希腊字母，无需重复调用定价函数。
+
+具体地，Heston 模型的 Delta 和 Vega（对 $v_0$ 的敏感度）可直接从特征函数积分中读出：
+\begin{align}
+  \Delta_\text{Heston} &= \frac{\partial V}{\partial S} = P_1 + S\frac{\partial P_1}{\partial S} - Ke^{-rT}\frac{\partial P_2}{\partial S}, \label{eq:heston_delta} \\
+  \mathcal{V}_\text{Heston} &= \frac{\partial V}{\partial v_0} = S\frac{\partial P_1}{\partial v_0} - Ke^{-rT}\frac{\partial P_2}{\partial v_0}, \label{eq:heston_vega}
+\end{align}
+其中 $\partial P_j/\partial S$ 和 $\partial P_j/\partial v_0$ 通过对特征函数的被积函数直接求导得到，计算量与定价本身相当\citep{heston1993closed}。这一特性使 Heston 模型在需要实时计算大量希腊字母的做市场景中具有显著优势。
+
+在 PINN 框架下，希腊字母可通过自动微分（automatic differentiation）直接从网络输出对输入求导得到，无需额外推导解析式：
+\begin{equation}
+  \Delta_\text{PINN} = \frac{\partial \hat{V}_\theta}{\partial S}, \quad
+  \Gamma_\text{PINN} = \frac{\partial^2 \hat{V}_\theta}{\partial S^2},
+\end{equation}
+这是 PINN 相对于传统有限差分方法的另一优势：希腊字母与期权价格在同一次前向传播中同时计算，且精度由自动微分保证，无有限差分的截断误差。
+
+% ─────────────────────────────────────────────────────────────────────────────
 \section{BSM-PINN}\label{sec:bsm_pinn}
 
 BSM 模型的 PDE 算子为：
@@ -95,7 +165,11 @@ BSM 模型存在解析解，可用于精确验证 PINN 的精度：
 \begin{equation}
   V_\text{BS}(S, t) = S\Phi(d_1) - Ke^{-r(T-t)}\Phi(d_2),
 \end{equation}
-其中 $d_1 = \frac{\ln(S/K) + (r + \sigma^2/2)(T-t)}{\sigma\sqrt{T-t}}$，$d_2 = d_1 - \sigma\sqrt{T-t}$，$\Phi(\cdot)$ 为标准正态分布函数。
+其中
+\begin{equation}\label{eq:bs_d1}
+  d_1 = \frac{\ln(S/K) + (r + \sigma^2/2)(T-t)}{\sigma\sqrt{T-t}}, \quad d_2 = d_1 - \sigma\sqrt{T-t},
+\end{equation}
+$\Phi(\cdot)$ 为标准正态分布函数。
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{CEV-PINN}\label{sec:cev_pinn}
