@@ -33,10 +33,16 @@ Rules for model selection:
   "stochastic volatility".
 - Default to "BSM" if unclear.
 
+Rules for option_type:
+- "european_call": European call (default if not specified)
+- "european_put": European put (user says "put", "看跌", "卖权")
+- "american_call": American call (user says "american call", "美式看涨")
+- "american_put": American put (user says "american put", "美式看跌", "美式期权")
+
 Always respond with a JSON object (no markdown, no explanation):
 {
   "model": "BSM" | "CEV" | "Heston",
-  "option_type": "call" | "put",
+  "option_type": "european_call" | "european_put" | "american_call" | "american_put",
   "S": <float>,
   "K": <float>,
   "T": <float>,

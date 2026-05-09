@@ -103,14 +103,20 @@ class GatedPINN(nn.Module):
 
 # ── PINN trainer ────────────────────────────────────────────────────────────
 class CEV_PINN:
+    OPTION_TYPES = {"european_call", "european_put", "american_call", "american_put"}
+
     def __init__(self, K=100.0, T=1.0, r=0.05, sigma=0.25, beta=0.5,
-                 S_max=300.0, device=None):
+                 S_max=300.0, option_type="european_call", device=None):
+        assert option_type in self.OPTION_TYPES
         self.K = K
         self.T = T
         self.r = r
         self.sigma = sigma
-        self.beta = beta          # elasticity parameter
+        self.beta = beta
         self.S_max = S_max
+        self.option_type = option_type
+        self.is_call = "call" in option_type
+        self.is_american = "american" in option_type
         self.device = device or (
             torch.device("cuda") if torch.cuda.is_available()
             else torch.device("cpu")
@@ -121,6 +127,12 @@ class CEV_PINN:
             self.optimizer, step_size=5000, gamma=0.5
         )
 
+    def _payoff(self, S):
+        if self.is_call:
+            return torch.clamp(S - self.K, min=0.0)
+        else:
+            return torch.clamp(self.K - S, min=0.0)
+
     def _sample_collocation(self, n=10000):
         S = torch.FloatTensor(n, 1).uniform_(0.01, self.S_max)
         t = torch.FloatTensor(n, 1).uniform_(0.0, self.T)
@@ -129,16 +141,26 @@ class CEV_PINN:
     def _sample_terminal(self, n=2000):
         S = torch.FloatTensor(n, 1).uniform_(0.01, self.S_max)
         t = torch.full((n, 1), self.T)
-        V = torch.clamp(S - self.K, min=0.0)
+        V = self._payoff(S)
         return S.to(self.device), t.to(self.device), V.to(self.device)
 
     def _sample_boundary(self, n=1000):
         t_lo = torch.FloatTensor(n, 1).uniform_(0.0, self.T)
-        S_lo = torch.zeros(n, 1)
-        V_lo = torch.zeros(n, 1)
         t_hi = torch.FloatTensor(n, 1).uniform_(0.0, self.T)
+        S_lo = torch.zeros(n, 1)
         S_hi = torch.full((n, 1), self.S_max)
-        V_hi = self.S_max - self.K * torch.exp(-self.r * (self.T - t_hi))
+        if self.is_call:
+            V_lo = torch.zeros(n, 1)
+            if self.is_american:
+                V_hi = torch.full((n, 1), self.S_max - self.K)
+            else:
+                V_hi = self.S_max - self.K * torch.exp(-self.r * (self.T - t_hi))
+        else:
+            if self.is_american:
+                V_lo = torch.full((n, 1), self.K)
+            else:
+                V_lo = self.K * torch.exp(-self.r * (self.T - t_lo))
+            V_hi = torch.zeros(n, 1)
         return (
             S_lo.to(self.device), t_lo.to(self.device), V_lo.to(self.device),
             S_hi.to(self.device), t_hi.to(self.device), V_hi.to(self.device),
@@ -167,10 +189,10 @@ class CEV_PINN:
         return self.net(x)
 
     def train(self, epochs=20000, log_every=1000,
-              w_pde=1.0, w_ic=10.0, w_bc=5.0):
+              w_pde=1.0, w_ic=10.0, w_bc=5.0, w_american=50.0):
         from tqdm import tqdm
         losses = []
-        pbar = tqdm(range(1, epochs + 1), desc=f"CEV β={self.beta}",
+        pbar = tqdm(range(1, epochs + 1), desc=f"CEV β={self.beta} {self.option_type}",
                     unit="epoch", dynamic_ncols=True)
         for epoch in pbar:
             self.optimizer.zero_grad()
@@ -186,6 +208,15 @@ class CEV_PINN:
                        + torch.mean((self._predict(S_hi, t_hi) - V_hi) ** 2))
 
             loss = w_pde * loss_pde + w_ic * loss_ic + w_bc * loss_bc
+
+            if self.is_american:
+                S_a, t_a = self._sample_collocation(n=5000)
+                V_pred = self._predict(S_a, t_a)
+                loss_american = torch.mean(
+                    torch.clamp(self._payoff(S_a) - V_pred, min=0.0) ** 2
+                )
+                loss = loss + w_american * loss_american
+
             loss.backward()
             self.optimizer.step()
             self.scheduler.step()
@@ -208,7 +239,8 @@ class CEV_PINN:
         torch.save({
             "state_dict": self.net.state_dict(),
             "params": dict(K=self.K, T=self.T, r=self.r, sigma=self.sigma,
-                           beta=self.beta, S_max=self.S_max),
+                           beta=self.beta, S_max=self.S_max,
+                           option_type=self.option_type),
         }, path)
 
     def load(self, path):

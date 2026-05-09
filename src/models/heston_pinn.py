@@ -76,6 +76,7 @@ class HestonNet(nn.Module):
     """
     3-input (S_norm, v_norm, t_norm) network with hard terminal constraint.
     Output: V(S,v,t) = payoff(S) + (T-t)*net(S,v,t)
+    Supports call and put payoffs.
     """
 
     def __init__(self, hidden=128, depth=6):
@@ -86,19 +87,24 @@ class HestonNet(nn.Module):
         layers.append(nn.Linear(hidden, 1))
         self.net = nn.Sequential(*layers)
 
-    def forward(self, S_n, v_n, t_n, S_raw, t_raw, K, T):
+    def forward(self, S_n, v_n, t_n, S_raw, t_raw, K, T, is_call=True):
         x = torch.cat([S_n, v_n, t_n], dim=1)
         raw = self.net(x)
-        payoff = torch.clamp(S_raw - K, min=0.0)
-        # hard constraint: satisfies terminal condition exactly
+        if is_call:
+            payoff = torch.clamp(S_raw - K, min=0.0)
+        else:
+            payoff = torch.clamp(K - S_raw, min=0.0)
         return payoff + (T - t_raw) * raw
 
 
 # ── PINN trainer ────────────────────────────────────────────────────────────
 class Heston_PINN:
+    OPTION_TYPES = {"european_call", "european_put", "american_call", "american_put"}
+
     def __init__(self, K=100.0, T=1.0, r=0.05,
                  kappa=2.0, theta=0.04, xi=0.3, rho=-0.7, v0=0.04,
-                 S_max=300.0, v_max=1.0, device=None):
+                 S_max=300.0, v_max=1.0, option_type="european_call", device=None):
+        assert option_type in self.OPTION_TYPES
         self.K = K
         self.T = T
         self.r = r
@@ -109,6 +115,9 @@ class Heston_PINN:
         self.v0 = v0
         self.S_max = S_max
         self.v_max = v_max
+        self.option_type = option_type
+        self.is_call = "call" in option_type
+        self.is_american = "american" in option_type
         self.device = device or (
             torch.device("cuda") if torch.cuda.is_available()
             else torch.device("cpu")
@@ -119,14 +128,19 @@ class Heston_PINN:
             self.optimizer, step_size=5000, gamma=0.5
         )
 
-    # ── helpers ─────────────────────────────────────────────────────────────
     def _to(self, t):
         return t.to(self.device)
+
+    def _payoff(self, S):
+        if self.is_call:
+            return torch.clamp(S - self.K, min=0.0)
+        else:
+            return torch.clamp(self.K - S, min=0.0)
 
     def _forward(self, S, v, t):
         return self.net(
             S / self.S_max, v / self.v_max, t / self.T,
-            S, t, self.K, self.T
+            S, t, self.K, self.T, self.is_call
         )
 
     def _sample_collocation(self, n=15000):
@@ -140,19 +154,26 @@ class Heston_PINN:
         t_s0 = self._to(torch.FloatTensor(n, 1).uniform_(0, self.T))
         v_s0 = self._to(torch.FloatTensor(n, 1).uniform_(1e-4, self.v_max))
         S_s0 = self._to(torch.zeros(n, 1))
-        V_s0 = self._to(torch.zeros(n, 1))
+        V_s0 = self._to(torch.full((n, 1), 0.0 if self.is_call
+                                   else self.K))  # put: K at S=0
 
         # S=S_max boundary
         t_sm = self._to(torch.FloatTensor(n, 1).uniform_(0, self.T))
         v_sm = self._to(torch.FloatTensor(n, 1).uniform_(1e-4, self.v_max))
         S_sm = self._to(torch.full((n, 1), self.S_max))
-        V_sm = self.S_max - self.K * torch.exp(-self.r * (self.T - t_sm))
+        if self.is_call:
+            if self.is_american:
+                V_sm = self._to(torch.full((n, 1), self.S_max - self.K))
+            else:
+                V_sm = self.S_max - self.K * torch.exp(-self.r * (self.T - t_sm))
+        else:
+            V_sm = self._to(torch.zeros(n, 1))  # deep OTM put
 
-        # v=v_max boundary: V ≈ S (deep ITM, high vol)
+        # v=v_max boundary
         t_vm = self._to(torch.FloatTensor(n, 1).uniform_(0, self.T))
         S_vm = self._to(torch.FloatTensor(n, 1).uniform_(0.01, self.S_max))
         v_vm = self._to(torch.full((n, 1), self.v_max))
-        V_vm = S_vm  # approximation
+        V_vm = S_vm if self.is_call else self._to(torch.zeros(n, 1))
 
         return (S_s0, v_s0, t_s0, V_s0,
                 S_sm, v_sm, t_sm, V_sm,
@@ -187,12 +208,12 @@ class Heston_PINN:
                     - self.r * V)
         return residual
 
-    # ── training loop ────────────────────────────────────────────────────────
     def train(self, epochs=30000, log_every=1000,
-              w_pde=1.0, w_bc=5.0):
+              w_pde=1.0, w_bc=5.0, w_american=50.0):
         from tqdm import tqdm
         losses = []
-        pbar = tqdm(range(1, epochs + 1), desc="Heston", unit="epoch",
+        pbar = tqdm(range(1, epochs + 1),
+                    desc=f"Heston-{self.option_type}", unit="epoch",
                     dynamic_ncols=True)
         for epoch in pbar:
             self.optimizer.zero_grad()
@@ -212,6 +233,15 @@ class Heston_PINN:
             )
 
             loss = w_pde * loss_pde + w_bc * loss_bc
+
+            if self.is_american:
+                S_a, v_a, t_a = self._sample_collocation(n=5000)
+                V_pred = self._forward(S_a, v_a, t_a)
+                loss_american = torch.mean(
+                    torch.clamp(self._payoff(S_a) - V_pred, min=0.0) ** 2
+                )
+                loss = loss + w_american * loss_american
+
             loss.backward()
             self.optimizer.step()
             self.scheduler.step()
@@ -239,7 +269,8 @@ class Heston_PINN:
             "state_dict": self.net.state_dict(),
             "params": dict(K=self.K, T=self.T, r=self.r, kappa=self.kappa,
                            theta=self.theta, xi=self.xi, rho=self.rho,
-                           v0=self.v0, S_max=self.S_max, v_max=self.v_max),
+                           v0=self.v0, S_max=self.S_max, v_max=self.v_max,
+                           option_type=self.option_type),
         }, path)
 
     def load(self, path):
