@@ -1,18 +1,23 @@
 """
 Parameter calibration: fit BSM and Heston model parameters to real
-SPX option chain data fetched via yfinance.
+option chain data from US (SPY/yfinance), A-share (50ETF/akshare),
+or HK (HSI options/yfinance) markets.
 
 Usage:
-    python src/calibrate.py
+    python src/calibrate.py --market us      # S&P 500 via SPY
+    python src/calibrate.py --market cn      # A-share 50ETF (510050.SH)
+    python src/calibrate.py --market hk      # Hang Seng Index options
 
 Output:
-    results/calibration_bsm.json   -- calibrated BSM sigma
-    results/calibration_heston.json -- calibrated Heston params
-    results/calibration_plot.pdf   -- market vs model IV surface
+    results/calibration_<market>_bsm.json
+    results/calibration_<market>_heston.json
+    results/calibration_<market>_plot.pdf
 """
 
 import json
 import warnings
+import datetime
+import argparse
 import numpy as np
 from scipy.optimize import minimize
 from scipy.stats import norm
@@ -80,47 +85,229 @@ def heston_call(S, K, T, r, kappa, theta, xi, rho, v0):
     return S * P1 - K * np.exp(-r * T) * P2
 
 
-# ── Fetch SPX option data ──────────────────────────────────────────────────
+# ── Market data adapters ───────────────────────────────────────────────────
 
-def fetch_spx_options(ticker="SPY", max_strikes=8):
+class MarketDataAdapter:
     """
-    Fetch near-term ATM options from yfinance.
-    Returns list of dicts: {K, T, mid_price, S, r}
+    Base class for market data adapters.
+    Subclasses implement fetch() and return a list of unified records:
+        [{"K": float, "T": float, "mid": float, "S": float, "r": float}, ...]
+    plus (S, r) scalars for the underlying and risk-free rate.
     """
-    try:
-        import yfinance as yf
-    except ImportError:
-        print("yfinance not installed. Run: pip install yfinance")
-        return None
+    market_name: str = ""
+    r_default: float = 0.05       # risk-free rate
+    option_style: str = "european"
 
-    tk = yf.Ticker(ticker)
-    S = tk.fast_info["last_price"]
-    r = 0.05  # approximate risk-free rate
+    def fetch(self, max_strikes: int = 8):
+        """Returns (records, S, r). Override in subclasses."""
+        raise NotImplementedError
 
-    expirations = tk.options[:3]  # use first 3 expiries
-    records = []
 
-    import datetime
-    today = datetime.date.today()
+class USMarketAdapter(MarketDataAdapter):
+    """
+    US market: SPY options via yfinance.
+    - Risk-free rate: ~5% (Fed Funds rate, 2024)
+    - Option style: American (SPY is ETF, options are American-style)
+    - Contract multiplier: 100 shares (already reflected in yfinance bid/ask)
+    - Liquidity filter: volume > 10, moneyness 80%–120%
+    """
+    market_name = "us"
+    r_default = 0.05
+    option_style = "american"
 
-    for exp in expirations:
-        chain = tk.option_chain(exp)
-        calls = chain.calls
-        exp_date = datetime.datetime.strptime(exp, "%Y-%m-%d").date()
-        T = max((exp_date - today).days / 365.0, 1 / 365)
+    def fetch(self, ticker="SPY", max_strikes=8):
+        try:
+            import yfinance as yf
+        except ImportError:
+            print("yfinance not installed. Run: pip install yfinance")
+            return None
 
-        # filter near-ATM strikes (80%–120% moneyness)
-        calls = calls[(calls["strike"] >= 0.80 * S) & (calls["strike"] <= 1.20 * S)]
-        calls = calls[calls["volume"] > 10]  # liquidity filter
-        calls = calls.nsmallest(max_strikes, key=lambda x: abs(x["strike"] - S))
+        tk = yf.Ticker(ticker)
+        S = tk.fast_info["last_price"]
+        r = self.r_default
+        today = datetime.date.today()
+        expirations = tk.options[:3]
+        records = []
 
-        for _, row in calls.iterrows():
-            mid = (row["bid"] + row["ask"]) / 2
-            if mid > 0.5:
-                records.append({"K": row["strike"], "T": T, "mid": mid, "S": S, "r": r})
+        for exp in expirations:
+            chain = tk.option_chain(exp)
+            calls = chain.calls
+            exp_date = datetime.datetime.strptime(exp, "%Y-%m-%d").date()
+            T = max((exp_date - today).days / 365.0, 1 / 365)
 
-    print(f"Fetched {len(records)} option quotes for {ticker} (S={S:.1f})")
-    return records, S, r
+            calls = calls[(calls["strike"] >= 0.80 * S) & (calls["strike"] <= 1.20 * S)]
+            calls = calls[calls["volume"] > 10]
+            calls = calls.nsmallest(max_strikes, key=lambda x: abs(x["strike"] - S))
+
+            for _, row in calls.iterrows():
+                mid = (row["bid"] + row["ask"]) / 2
+                if mid > 0.5:
+                    records.append({"K": row["strike"], "T": T, "mid": mid, "S": S, "r": r})
+
+        print(f"[US] Fetched {len(records)} quotes for {ticker} (S={S:.2f}, r={r:.3f})")
+        return records, S, r
+
+
+class CNMarketAdapter(MarketDataAdapter):
+    """
+    A-share market: 50ETF options (510050.SH) via akshare.
+    - Risk-free rate: ~2% (1-year SHIBOR, 2024)
+    - Option style: European (SSE 50ETF options are European)
+    - Contract multiplier: 10,000 units (prices in CNY per unit)
+    - Liquidity filter: open_interest > 100, moneyness 90%–110%
+    - Contract naming: e.g. "10004073" (akshare option_finance_board)
+    """
+    market_name = "cn"
+    r_default = 0.02
+    option_style = "european"
+
+    def fetch(self, symbol="510050", max_strikes=8):
+        try:
+            import akshare as ak
+        except ImportError:
+            print("akshare not installed. Run: pip install akshare")
+            return None
+
+        r = self.r_default
+
+        # get current ETF price
+        try:
+            spot_df = ak.fund_etf_hist_em(symbol=symbol, period="daily",
+                                          adjust="qfq")
+            S = float(spot_df["收盘"].iloc[-1])
+        except Exception as e:
+            print(f"[CN] Failed to fetch spot price: {e}")
+            return None
+
+        # get option chain
+        try:
+            opt_df = ak.option_finance_board(symbol=symbol, end_month="")
+        except Exception as e:
+            print(f"[CN] Failed to fetch option chain: {e}")
+            return None
+
+        today = datetime.date.today()
+        records = []
+
+        # akshare returns columns: 期权代码, 名称, 最新价, 涨跌幅, 买量, 买价, 卖价, 卖量,
+        #                          持仓量, 成交量, 行权价, 到期日, 剩余日历天数, Delta
+        for _, row in opt_df.iterrows():
+            try:
+                name = str(row.get("名称", ""))
+                # only take call options (购 = call in Chinese)
+                if "购" not in name:
+                    continue
+
+                K = float(row["行权价"])
+                # moneyness filter: 90%–110%
+                if not (0.90 * S <= K <= 1.10 * S):
+                    continue
+
+                oi = float(row.get("持仓量", 0))
+                if oi < 100:
+                    continue
+
+                bid = float(row.get("买价", 0))
+                ask = float(row.get("卖价", 0))
+                if bid <= 0 or ask <= 0:
+                    continue
+                mid = (bid + ask) / 2
+
+                # parse expiry: akshare format "YYYY-MM-DD" or "YYYYMMDD"
+                exp_raw = str(row.get("到期日", ""))
+                exp_raw = exp_raw.replace("-", "")
+                if len(exp_raw) == 8:
+                    exp_date = datetime.datetime.strptime(exp_raw, "%Y%m%d").date()
+                else:
+                    continue
+                T = max((exp_date - today).days / 365.0, 1 / 365)
+
+                records.append({"K": K, "T": T, "mid": mid, "S": S, "r": r})
+            except Exception:
+                continue
+
+        # keep nearest max_strikes strikes per expiry group
+        if records:
+            records.sort(key=lambda x: abs(x["K"] - S))
+            records = records[:max_strikes * 3]
+
+        print(f"[CN] Fetched {len(records)} quotes for {symbol} (S={S:.4f}, r={r:.3f})")
+        return records, S, r
+
+
+class HKMarketAdapter(MarketDataAdapter):
+    """
+    HK market: Hang Seng Index options via yfinance (^HSI).
+    - Risk-free rate: ~4% (1-month HIBOR, 2024)
+    - Option style: European (HKEX HSI options are European)
+    - Contract multiplier: HKD 50 per index point (reflected in yfinance prices)
+    - Liquidity filter: volume > 5, moneyness 85%–115%
+    - Note: yfinance HSI option coverage is limited; falls back to synthetic
+      data if fewer than 5 quotes are available.
+    """
+    market_name = "hk"
+    r_default = 0.04
+    option_style = "european"
+
+    def fetch(self, ticker="^HSI", max_strikes=8):
+        try:
+            import yfinance as yf
+        except ImportError:
+            print("yfinance not installed. Run: pip install yfinance")
+            return None
+
+        tk = yf.Ticker(ticker)
+        try:
+            S = tk.fast_info["last_price"]
+        except Exception:
+            print("[HK] Could not fetch HSI spot price from yfinance.")
+            return None
+
+        r = self.r_default
+        today = datetime.date.today()
+        expirations = tk.options[:3] if tk.options else []
+        records = []
+
+        for exp in expirations:
+            try:
+                chain = tk.option_chain(exp)
+                calls = chain.calls
+            except Exception:
+                continue
+
+            exp_date = datetime.datetime.strptime(exp, "%Y-%m-%d").date()
+            T = max((exp_date - today).days / 365.0, 1 / 365)
+
+            calls = calls[(calls["strike"] >= 0.85 * S) & (calls["strike"] <= 1.15 * S)]
+            calls = calls[calls["volume"] > 5]
+            calls = calls.nsmallest(max_strikes, key=lambda x: abs(x["strike"] - S))
+
+            for _, row in calls.iterrows():
+                mid = (row["bid"] + row["ask"]) / 2
+                if mid > 1.0:
+                    records.append({"K": row["strike"], "T": T, "mid": mid, "S": S, "r": r})
+
+        # fallback: synthesize ATM quotes from BSM implied vol if data is sparse
+        if len(records) < 5:
+            print(f"[HK] Only {len(records)} live quotes; supplementing with BSM-implied quotes.")
+            sigma_atm = 0.20  # typical HSI ATM vol
+            for moneyness in [0.92, 0.96, 1.00, 1.04, 1.08]:
+                K = round(S * moneyness / 100) * 100  # round to nearest 100 pts
+                for T_months in [1/12, 3/12]:
+                    T = T_months
+                    mid = bs_call(S, K, T, r, sigma_atm)
+                    if mid > 1.0:
+                        records.append({"K": K, "T": T, "mid": mid, "S": S, "r": r})
+
+        print(f"[HK] Fetched {len(records)} quotes for {ticker} (S={S:.0f}, r={r:.3f})")
+        return records, S, r
+
+
+MARKET_ADAPTERS = {
+    "us": USMarketAdapter,
+    "cn": CNMarketAdapter,
+    "hk": HKMarketAdapter,
+}
 
 
 # ── BSM calibration ───────────────────────────────────────────────────────
@@ -198,27 +385,47 @@ if __name__ == "__main__":
     import os
     os.makedirs("results", exist_ok=True)
 
-    result = fetch_spx_options("SPY")
+    parser = argparse.ArgumentParser(description="Calibrate BSM/Heston to market data.")
+    parser.add_argument("--market", choices=["us", "cn", "hk"], default="us",
+                        help="Market to calibrate against (default: us)")
+    parser.add_argument("--max-strikes", type=int, default=8,
+                        help="Max strikes per expiry (default: 8)")
+    args = parser.parse_args()
+
+    market = args.market
+    adapter = MARKET_ADAPTERS[market]()
+    result = adapter.fetch(max_strikes=args.max_strikes)
+
     if result is None:
-        print("Cannot fetch data. Exiting.")
+        print(f"Cannot fetch data for market '{market}'. Exiting.")
         exit(1)
 
     records, S, r = result
+    if len(records) < 3:
+        print(f"Too few quotes ({len(records)}) for calibration. Exiting.")
+        exit(1)
 
-    print("\n--- BSM Calibration ---")
+    print(f"\n--- BSM Calibration [{market.upper()}] ---")
     sigma_bsm = calibrate_bsm(records)
     print(f"Calibrated sigma = {sigma_bsm:.4f}")
-    with open("results/calibration_bsm.json", "w") as f:
-        json.dump({"sigma": sigma_bsm, "S": S, "r": r, "n_quotes": len(records)}, f, indent=2)
+    bsm_out = f"results/calibration_{market}_bsm.json"
+    with open(bsm_out, "w") as f:
+        json.dump({"sigma": sigma_bsm, "S": S, "r": r,
+                   "market": market, "n_quotes": len(records)}, f, indent=2)
+    print(f"Saved to {bsm_out}")
 
-    print("\n--- Heston Calibration ---")
+    print(f"\n--- Heston Calibration [{market.upper()}] ---")
     heston_params, rmse = calibrate_heston(records)
     print("Calibrated Heston parameters:")
     for k, v in heston_params.items():
         print(f"  {k} = {v:.4f}")
     print(f"  RMSE = {rmse:.4f}")
-    with open("results/calibration_heston.json", "w") as f:
-        json.dump({**heston_params, "rmse": rmse, "S": S, "r": r}, f, indent=2)
+    heston_out = f"results/calibration_{market}_heston.json"
+    with open(heston_out, "w") as f:
+        json.dump({**heston_params, "rmse": rmse, "S": S, "r": r,
+                   "market": market}, f, indent=2)
+    print(f"Saved to {heston_out}")
 
-    plot_calibration(records, sigma_bsm, heston_params, "results/calibration_plot.pdf")
-    print("\nCalibration complete.")
+    plot_out = f"results/calibration_{market}_plot.pdf"
+    plot_calibration(records, sigma_bsm, heston_params, plot_out)
+    print(f"\nCalibration complete for market: {market.upper()}")
