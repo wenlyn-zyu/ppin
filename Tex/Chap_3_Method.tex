@@ -1,0 +1,190 @@
+\chapter{方法}\label{chap:method}
+
+本章介绍基于物理信息神经网络（PINN）与大语言模型（LLM）的统一期权定价框架。系统整体流程为：用户以自然语言描述期权需求，LLM 路由层解析参数并选择模型，对应的 PINN 求解器返回定价结果。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{PINN 统一框架}\label{sec:pinn_framework}
+
+\subsection{问题形式化}
+
+设期权价值 $V$ 满足如下一般形式的 PDE：
+\begin{equation}\label{eq:general_pde}
+  \mathcal{F}[V](x, t) = 0, \quad (x, t) \in \Omega \times [0, T),
+\end{equation}
+其中 $x$ 为状态变量（BSM/CEV 中为股价 $S$，Heston 中为 $(S, v)$），$\mathcal{F}$ 为微分算子，$T$ 为到期日。边界条件与终值条件分别为：
+\begin{align}
+  V(x, T) &= \phi(x), \quad x \in \Omega, \label{eq:terminal} \\
+  \mathcal{B}[V](x, t) &= g(x, t), \quad x \in \partial\Omega. \label{eq:boundary}
+\end{align}
+对于欧式看涨期权，终值条件为 $\phi(x) = \max(S - K, 0)$。
+
+\subsection{损失函数}
+
+PINN 用神经网络 $\hat{V}_\theta(x, t)$ 近似真实解 $V(x, t)$，通过最小化以下复合损失函数训练网络参数 $\theta$：
+\begin{equation}\label{eq:loss}
+  \mathcal{L}(\theta) = w_\text{pde}\,\mathcal{L}_\text{pde}
+                      + w_\text{ic}\,\mathcal{L}_\text{ic}
+                      + w_\text{bc}\,\mathcal{L}_\text{bc},
+\end{equation}
+其中各项定义为：
+\begin{align}
+  \mathcal{L}_\text{pde} &= \frac{1}{N_c}\sum_{i=1}^{N_c}
+    \left|\mathcal{F}[\hat{V}_\theta](x_i, t_i)\right|^2, \\
+  \mathcal{L}_\text{ic}  &= \frac{1}{N_T}\sum_{j=1}^{N_T}
+    \left|\hat{V}_\theta(x_j, T) - \phi(x_j)\right|^2, \\
+  \mathcal{L}_\text{bc}  &= \frac{1}{N_b}\sum_{k=1}^{N_b}
+    \left|\mathcal{B}[\hat{V}_\theta](x_k, t_k) - g(x_k, t_k)\right|^2.
+\end{align}
+配点 $\{(x_i, t_i)\}_{i=1}^{N_c}$ 在求解域内随机采样，无需网格剖分。PDE 残差通过自动微分（automatic differentiation）精确计算。
+
+\subsection{硬约束终值条件（ICPINN）}
+
+软约束方式将终值条件纳入损失函数，网络只能近似满足。参考 Guo 等人\citep{guo2024icpinn}的 ICPINN 方法，对 Heston 模型采用输出变换将终值条件硬编码：
+\begin{equation}\label{eq:hard_constraint}
+  \hat{V}_\theta(S, v, t) = \phi(S) + (T - t)\cdot\text{net}_\theta(S, v, t).
+\end{equation}
+当 $t = T$ 时，$(T-t) = 0$，故 $\hat{V}_\theta(S, v, T) = \phi(S)$ 精确成立，无需在损失函数中加入 $\mathcal{L}_\text{ic}$ 项。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{网络架构}\label{sec:architecture}
+
+\subsection{门控网络（BSM 与 CEV）}
+
+BSM 和 CEV 模型采用门控网络结构\citep{dhiman2023pinn}，由浅层分支与深层分支并联组成：
+\begin{align}
+  h_s &= f_\text{shallow}(x), \\
+  h_d &= f_\text{deep}(x), \\
+  g   &= \sigma(W_g h_s + b_g), \\
+  h   &= g \odot h_s + (1-g) \odot h_d, \\
+  \hat{V} &= W_\text{out} h + b_\text{out},
+\end{align}
+其中 $\sigma(\cdot)$ 为 sigmoid 函数，$\odot$ 为逐元素乘法，$g \in (0,1)$ 为门控权重。浅层分支（1 个隐藏层，64 个神经元）捕捉期权价格的线性部分（深度实值/虚值区域），深层分支（4 个隐藏层，64 个神经元）捕捉平值附近的非线性特征。激活函数均为 $\tanh$。
+
+\subsection{深层全连接网络（Heston）}
+
+Heston 模型输入维度为 3（$S, v, t$），采用 6 层全连接网络，每层 128 个神经元，激活函数为 $\tanh$，并结合式~\eqref{eq:hard_constraint}~的硬约束输出变换。
+
+\subsection{输入归一化}
+
+为提升训练稳定性，所有输入在送入网络前进行归一化：
+\begin{equation}
+  \tilde{S} = \frac{S}{S_\max}, \quad
+  \tilde{v} = \frac{v}{v_\max}, \quad
+  \tilde{t} = \frac{t}{T},
+\end{equation}
+使各输入均落在 $[0, 1]$ 区间，避免不同量级的输入导致梯度不平衡。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{BSM-PINN}\label{sec:bsm_pinn}
+
+BSM 模型的 PDE 算子为：
+\begin{equation}
+  \mathcal{F}_\text{BSM}[V] =
+    \frac{\partial V}{\partial t}
+    + \frac{1}{2}\sigma^2 S^2 \frac{\partial^2 V}{\partial S^2}
+    + rS\frac{\partial V}{\partial S} - rV.
+\end{equation}
+边界条件设置为：
+\begin{align}
+  V(0, t) &= 0, \\
+  V(S_\max, t) &= S_\max - Ke^{-r(T-t)}.
+\end{align}
+上边界采用深度实值近似：当 $S \gg K$ 时，期权几乎必然被执行，价值近似为远期价值 $S - Ke^{-r(T-t)}$。
+
+BSM 模型存在解析解，可用于精确验证 PINN 的精度：
+\begin{equation}
+  V_\text{BS}(S, t) = S\Phi(d_1) - Ke^{-r(T-t)}\Phi(d_2),
+\end{equation}
+其中 $d_1 = \frac{\ln(S/K) + (r + \sigma^2/2)(T-t)}{\sigma\sqrt{T-t}}$，$d_2 = d_1 - \sigma\sqrt{T-t}$，$\Phi(\cdot)$ 为标准正态分布函数。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{CEV-PINN}\label{sec:cev_pinn}
+
+CEV 模型将 BSM 中的常数波动率替换为依赖股价的局部波动率，PDE 算子为：
+\begin{equation}
+  \mathcal{F}_\text{CEV}[V] =
+    \frac{\partial V}{\partial t}
+    + \frac{1}{2}\sigma^2 S^{2\beta} \frac{\partial^2 V}{\partial S^2}
+    + rS\frac{\partial V}{\partial S} - rV.
+\end{equation}
+本文取 $\beta = 0.5$（平方根过程），此时波动率 $\sigma S^{-0.5}$ 随股价上涨而下降，能够捕捉股票市场中的杠杆效应。
+
+CEV 模型一般无闭合解析解，本文采用 Crank-Nicolson 有限差分法生成参考价格用于验证。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Heston-PINN}\label{sec:heston_pinn}
+
+Heston 模型的 PDE 算子为：
+\begin{equation}
+  \mathcal{F}_\text{Heston}[V] =
+    \frac{\partial V}{\partial t}
+    + \frac{1}{2}vS^2\frac{\partial^2 V}{\partial S^2}
+    + \rho\xi vS\frac{\partial^2 V}{\partial S\partial v}
+    + \frac{1}{2}\xi^2 v\frac{\partial^2 V}{\partial v^2}
+    + rS\frac{\partial V}{\partial S}
+    + \kappa(\theta-v)\frac{\partial V}{\partial v}
+    - rV.
+\end{equation}
+边界条件设置为：
+\begin{align}
+  V(0, v, t) &= 0, \\
+  V(S_\max, v, t) &= S_\max - Ke^{-r(T-t)}, \\
+  V(S, v_\max, t) &\approx S.
+\end{align}
+当 $v \to v_\max$ 时，极高波动率下期权价值趋近于标的资产价格本身。
+
+Heston 模型具有半解析解（特征函数方法），本文用其作为验证基准：
+\begin{equation}
+  V_\text{Heston}(S, v, t) = S\,P_1 - Ke^{-r(T-t)}\,P_2,
+\end{equation}
+其中 $P_1, P_2$ 通过对特征函数的数值积分求得\citep{heston1993closed}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{LLM 路由层}\label{sec:llm_router}
+
+\subsection{设计动机}
+
+三种 PINN 模型分别适用于不同的市场假设：BSM 适用于波动率平稳的市场，CEV 适用于存在杠杆效应的股票市场，Heston 适用于波动率本身随机变化的场景。传统工具要求用户手动指定模型类型和参数，门槛较高。
+
+本文引入 LLM 作为智能路由层，使用户可以通过自然语言描述期权需求，由 LLM 自动完成模型选择和参数提取。
+
+\subsection{路由规则}
+
+LLM 根据以下规则选择模型：
+\begin{itemize}
+  \item 若用户仅提供常数波动率 $\sigma$，选择 \textbf{BSM}；
+  \item 若用户提及弹性参数 $\beta$ 或"CEV"，选择 \textbf{CEV}；
+  \item 若用户提供随机波动率参数（$\kappa, \theta, \xi, \rho, v_0$）或提及"Heston"，选择 \textbf{Heston}；
+  \item 默认选择 \textbf{BSM}。
+\end{itemize}
+
+\subsection{参数提取}
+
+LLM 接收用户的自然语言输入，输出结构化 JSON 参数：
+\begin{verbatim}
+{
+  "model": "BSM",
+  "option_type": "call",
+  "S": 100.0,
+  "K": 100.0,
+  "T": 1.0,
+  "r": 0.05,
+  "sigma": 0.2
+}
+\end{verbatim}
+本文使用 DeepSeek API（兼容 OpenAI 接口），通过 `response_format: json_object` 约束输出格式，确保参数提取的可靠性。
+
+\subsection{系统流程}
+
+完整的定价流程如下：
+\begin{enumerate}
+  \item 用户输入自然语言描述（中文或英文均可）；
+  \item LLM 解析输入，提取期权参数，选择定价模型；
+  \item 对应的 PINN 模型加载预训练权重，对给定参数即时推断；
+  \item 系统返回期权价格及所用模型信息。
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{本章小结}\label{sec:method_summary}
+
+本章介绍了基于 PINN 与 LLM 的统一期权定价框架。在 PINN 部分，三大模型共用统一的损失函数结构，Heston 模型额外采用 ICPINN 硬约束确保终值条件精确满足；在网络架构上，BSM/CEV 使用门控网络，Heston 使用深层全连接网络。在 LLM 部分，路由层通过结构化输出实现可靠的参数提取和模型选择。下一章将报告三大模型的实验结果。

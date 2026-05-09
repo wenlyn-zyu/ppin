@@ -7,29 +7,29 @@
 \confidential{}% 密级：只有涉密论文才填写
 \schoollogo{scale=0.2}{ShanghaiTechLogo}% 校徽
 %======论文题目 页眉显示 务必准确========
-\title{假的论文题目也可以很长很长很长很长要多长有多长}% 论文中文题目
-\author{假人}% 论文作者
-\ID{12345678}
-\entranceYear{2016}
-\advisor{假的教授}% 指导教师：姓名
+\title{基于物理信息神经网络与大语言模型的统一期权定价框架}% 论文中文题目
+\author{朱文龙}% 论文作者
+\ID{2022XXXXXX}
+\entranceYear{2022}
+\advisor{指导教师姓名}% 指导教师：姓名
 \advisorsec{}% 第二指导老师：按情况填写
 \degree{学士}% 学位：学士、硕士、博士
-\degreetype{哲学}% 学位类别：理学、工学、工程、医学等
-\major{英语哲学}% 二级学科专业名称
-\institute{上海科技大学外语学院}% 院系名称
-\chinesedate{二零一\quad~年~\quad~月}% 毕业日期：夏季为6月、冬季为12月
+\degreetype{工学}% 学位类别：理学、工学、工程、医学等
+\major{计算机科学与技术}% 二级学科专业名称
+\institute{上海科技大学信息科学与技术学院}% 院系名称
+\chinesedate{二零二六年六月}% 毕业日期：夏季为6月、冬季为12月
 %-
 %-> 英文封面信息
 %-
-\englishtitle{A Brilliant Work}% 论文英文题目
-\englishauthor{Fake Student}% 论文作者
-\englishadvisor{Supervisor: Fake Professor}% 指导教师
+\englishtitle{A Unified Option Pricing Framework Based on Physics-Informed Neural Networks and Large Language Models}% 论文英文题目
+\englishauthor{Zhu Wenlong}% 论文作者
+\englishadvisor{Supervisor: Professor Name}% 指导教师
 \englishdegree{Bachelor}% 学位：Bachelor, Master, Doctor。封面格式将根据英文学位名称自动切换，请确保拼写准确无误
-\englishdegreetype{Philosophy}% 学位类别：Philosophy, Natural Science, Engineering, Economics, Agriculture 等
+\englishdegreetype{Engineering}% 学位类别：Philosophy, Natural Science, Engineering, Economics, Agriculture 等
 \englishthesistype{thesis}% 论文类型： thesis, dissertation
-\englishmajor{English Philosophy}% 二级学科专业名称
-\englishinstitute{School of Foreign Language}% 院系名称
-\englishdate{\quad / \quad /\quad}% 毕业日期：夏季为June、冬季为December
+\englishmajor{Computer Science and Technology}% 二级学科专业名称
+\englishinstitute{School of Information Science and Technology}% 院系名称
+\englishdate{June 2026}% 毕业日期：夏季为June、冬季为December
 %-
 %-> 生成封面
 %-
@@ -51,15 +51,15 @@
 \setcounter{page}{1}% 开始页码
 \pagenumbering{Roman}% 页码符号
 
-本文是修改自中国科学院大学学位论文模板ucasthesis的使用说明文档的上海科技大学学位论文模板使用说明文档。主要内容为介绍\LaTeX{}文档类ucasthesis的用法，以及如何使用\LaTeX{}快速高效地撰写学位论文。
+本文提出并实现了一个基于物理信息神经网络（PINN）与大语言模型（LLM）的统一期权定价框架。针对 Black-Scholes-Merton（BSM）、常弹性方差（CEV）和 Heston 三大经典期权定价模型，分别构建了对应的 PINN 求解器，将 PDE 残差直接嵌入神经网络损失函数，无需网格剖分即可对任意输入即时推断。对于 Heston 模型，采用 ICPINN 硬约束输出变换，确保终值条件在机器精度下精确满足。在网络架构上，BSM 和 CEV 模型使用门控网络（浅层分支与深层分支并联），Heston 模型使用深层全连接网络。在此基础上，引入 DeepSeek 大语言模型作为智能路由层，通过结构化 JSON 输出实现自然语言到期权参数的可靠转换，支持中英文输入。实验结果表明，BSM-PINN 的平均绝对误差（MAE）为 0.056，CEV-PINN 的 MAE 为 1.099，Heston-PINN 的 MAE 为 2.357；LLM 路由层在测试用例上实现了 100\% 的模型选择准确率。本文验证了 PINN 与 LLM 结合用于期权定价的可行性，为智能金融计算提供了一种新的实现路径。
 
-\keywords{上海科技大学，学位论文，\LaTeX{}模板}% 中文关键词
+\keywords{物理信息神经网络，期权定价，Black-Scholes 模型，Heston 模型，大语言模型}
 %-
 %-> 英文摘要
 %-
 \chapter*{Abstract}\chaptermark{Abstract}% 摘要标题
 
-This paper is a help documentation for the \LaTeX{} class ucasthesis, which is  a thesis template for the University of Chinese Academy of Sciences. The main content is about how to use the ucasthesis, as well as how to write thesis efficiently by using \LaTeX{}.
+This thesis proposes and implements a unified option pricing framework based on Physics-Informed Neural Networks (PINN) and Large Language Models (LLM). For three classical option pricing models — Black-Scholes-Merton (BSM), Constant Elasticity of Variance (CEV), and Heston — we construct corresponding PINN solvers that embed PDE residuals directly into the neural network loss function, enabling mesh-free inference at arbitrary inputs. For the Heston model, we adopt the ICPINN hard-constraint output transformation to ensure exact satisfaction of the terminal condition at machine precision. BSM and CEV models use a gated network architecture (parallel shallow and deep branches), while the Heston model uses a deeper fully-connected network. On top of this, we integrate the DeepSeek large language model as an intelligent routing layer, converting natural language descriptions into structured option parameters via JSON-constrained output, supporting both Chinese and English input. Experimental results show that BSM-PINN achieves a mean absolute error (MAE) of 0.056, CEV-PINN achieves MAE of 1.099, and Heston-PINN achieves MAE of 2.357; the LLM routing layer achieves 100\% model selection accuracy on test cases. This work validates the feasibility of combining PINN and LLM for option pricing, providing a new implementation path for intelligent financial computation.
 
-\englishkeywords{ShanghaiTech University, Thesis, \LaTeX{} Template}% 英文关键词
+\englishkeywords{Physics-Informed Neural Networks, Option Pricing, Black-Scholes Model, Heston Model, Large Language Models}
 %---------------------------------------------------------------------------%

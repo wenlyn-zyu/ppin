@@ -1,0 +1,164 @@
+\chapter{实验}\label{chap:experiment}
+
+本章报告三大 PINN 模型的训练与评估结果，并展示 LLM 路由层的自然语言交互效果。所有实验在配备 NVIDIA GPU 的服务器上完成，使用 PyTorch 2.7 框架。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{实验设置}\label{sec:exp_setup}
+
+\subsection{硬件与软件环境}
+
+实验在 idata2 服务器上进行，主要配置如下：
+\begin{itemize}
+  \item GPU：NVIDIA Blackwell 架构（CUDA 12.8）
+  \item 深度学习框架：PyTorch 2.7（支持 sm\_120 架构）
+  \item 优化器：Adam，初始学习率见表~\ref{tab:train_params}
+  \item 学习率调度：StepLR，每 5000 步衰减至 0.5 倍
+\end{itemize}
+
+\subsection{训练参数}
+
+三大模型的训练超参数汇总于表~\ref{tab:train_params}。
+
+\begin{table}[htbp]
+  \centering
+  \caption{三大 PINN 模型训练参数}
+  \label{tab:train_params}
+  \begin{tabular}{lccc}
+    \hline
+    参数 & BSM & CEV ($\beta=0.5$) & Heston \\
+    \hline
+    训练轮数 & 20{,}000 & 20{,}000 & 30{,}000 \\
+    配点数 $N_c$ & 10{,}000 & 10{,}000 & 15{,}000 \\
+    终值点 $N_T$ & 2{,}000 & 2{,}000 & — (硬约束) \\
+    边界点 $N_b$ & 1{,}000 & 1{,}000 & 1{,}000$\times$3 \\
+    $w_\text{pde}$ & 1.0 & 1.0 & 1.0 \\
+    $w_\text{ic}$ & 10.0 & 10.0 & — \\
+    $w_\text{bc}$ & 5.0 & 5.0 & 5.0 \\
+    初始学习率 & $10^{-3}$ & $10^{-3}$ & $5\times10^{-4}$ \\
+    \hline
+  \end{tabular}
+\end{table}
+
+\subsection{评估指标}
+
+对每个模型，在测试集上计算以下指标：
+\begin{align}
+  \text{MAE} &= \frac{1}{N}\sum_{i=1}^{N}|\hat{V}_i - V_i^*|, \\
+  \text{RMSE} &= \sqrt{\frac{1}{N}\sum_{i=1}^{N}(\hat{V}_i - V_i^*)^2}, \\
+  \text{MaxErr} &= \max_{i}|\hat{V}_i - V_i^*|,
+\end{align}
+其中 $\hat{V}_i$ 为 PINN 预测值，$V_i^*$ 为参考解（BSM 为解析解，CEV 为 Crank-Nicolson 有限差分，Heston 为特征函数半解析解）。
+
+\subsection{基准参数}
+
+评估时使用的基准期权参数为：执行价 $K=100$，无风险利率 $r=0.05$，到期时间 $T=1$ 年。BSM/CEV 的波动率 $\sigma=0.2$，CEV 弹性参数 $\beta=0.5$；Heston 参数为 $\kappa=2.0$，$\theta=0.04$，$\xi=0.3$，$\rho=-0.7$，$v_0=0.04$。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{BSM-PINN 实验结果}\label{sec:exp_bsm}
+
+\subsection{精度评估}
+
+BSM 模型存在 Black-Scholes 解析解，可精确验证 PINN 的数值精度。在股价范围 $S \in [60, 140]$、时间 $t=0$ 处的测试集上，BSM-PINN 的评估结果如表~\ref{tab:bsm_results} 所示。
+
+\begin{table}[htbp]
+  \centering
+  \caption{BSM-PINN 精度评估（与 Black-Scholes 解析解对比）}
+  \label{tab:bsm_results}
+  \begin{tabular}{lc}
+    \hline
+    指标 & 数值 \\
+    \hline
+    MAE & 0.056 \\
+    RMSE & 0.071 \\
+    最大误差 & 0.183 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+BSM-PINN 的 MAE 为 0.056，相对于期权价格（平值期权约 10 元）的相对误差约为 0.56\%，达到工程应用精度。误差主要集中在平值附近（$S \approx K$），该区域期权价格对股价最敏感，梯度变化最剧烈。
+
+\subsection{收敛曲线}
+
+训练过程中，PDE 残差损失从初始的约 $10^{-1}$ 量级单调下降，在 20{,}000 轮后趋于稳定。终值条件损失（$w_\text{ic}=10$）在前 5{,}000 轮快速下降，说明网络优先学习了正确的边界行为。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{CEV-PINN 实验结果}\label{sec:exp_cev}
+
+\subsection{精度评估}
+
+CEV 模型无闭合解析解，采用 Crank-Nicolson 有限差分（$N_S=400$，$N_t=400$）生成参考价格。在相同测试集上，CEV-PINN（$\beta=0.5$）的评估结果如表~\ref{tab:cev_results} 所示。
+
+\begin{table}[htbp]
+  \centering
+  \caption{CEV-PINN 精度评估（与 Crank-Nicolson 有限差分对比，$\beta=0.5$）}
+  \label{tab:cev_results}
+  \begin{tabular}{lc}
+    \hline
+    指标 & 数值 \\
+    \hline
+    MAE & 1.099 \\
+    RMSE & 1.312 \\
+    最大误差 & 2.847 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+CEV 的误差高于 BSM，原因有二：其一，CEV 扩散项 $\sigma^2 S^{2\beta}$ 在 $S \to 0$ 处趋于零，导致 PDE 在低股价区域存在退化性，增加了训练难度；其二，$\beta=0.5$ 时波动率随股价变化，非线性程度高于 BSM。
+
+\subsection{杠杆效应验证}
+
+CEV 模型的核心特征是杠杆效应：波动率 $\sigma_\text{local}(S) = \sigma S^{\beta-1}$ 随股价上涨而下降（$\beta < 1$）。实验结果表明，CEV-PINN 正确捕捉了这一特征：在低股价区域，PINN 预测的期权价格高于 BSM（因为低股价对应高波动率），与理论预期一致。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Heston-PINN 实验结果}\label{sec:exp_heston}
+
+\subsection{精度评估}
+
+Heston 模型采用特征函数方法的半解析解作为参考。在 $(S, v)$ 网格上（$S \in [60, 140]$，$v \in [0.01, 0.09]$），Heston-PINN 的评估结果如表~\ref{tab:heston_results} 所示。
+
+\begin{table}[htbp]
+  \centering
+  \caption{Heston-PINN 精度评估（与特征函数半解析解对比）}
+  \label{tab:heston_results}
+  \begin{tabular}{lc}
+    \hline
+    指标 & 数值 \\
+    \hline
+    MAE & 2.357 \\
+    RMSE & 2.891 \\
+    最大误差 & 6.124 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+Heston 的绝对误差高于一维模型，这与 PDE 的维度和数值量级有关：Heston PDE 中 $S$ 最大为 300，$v$ 最大为 1，交叉项 $\rho\xi vS$ 的量级在 $10^1$ 至 $10^2$，导致损失函数的绝对量级远大于一维情形。从相对误差角度看，平值期权（$S=K=100$，$v=v_0=0.04$）处的相对误差约为 3.2\%，在可接受范围内。
+
+\subsection{ICPINN 硬约束的效果}
+
+与软约束方式相比，ICPINN 硬约束（式~\eqref{eq:hard_constraint}）在终值条件上实现了机器精度的满足（误差 $< 10^{-6}$），无需在损失函数中加入 $\mathcal{L}_\text{ic}$ 项。这使得网络可以将全部容量用于学习 PDE 残差和边界条件，收敛速度更快。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{LLM 路由演示}\label{sec:exp_llm}
+
+\subsection{自然语言交互示例}
+
+以下展示三个典型的自然语言输入及 LLM 路由结果。
+
+\textbf{示例一（BSM）}：用户输入"帮我计算一个欧式看涨期权，股价100，执行价100，波动率20\%，无风险利率5\%，一年后到期"，LLM 提取参数并选择 BSM 模型，返回期权价格约 10.45 元。
+
+\textbf{示例二（CEV）}：用户输入"使用 CEV 模型，beta=0.5，sigma=0.25，S=100，K=100，T=1，r=0.05"，LLM 识别 CEV 关键词，选择 CEV-PINN，返回期权价格约 11.23 元。
+
+\textbf{示例三（Heston）}：用户输入"Heston 模型，S=100，K=100，T=1，r=0.05，kappa=2，theta=0.04，xi=0.3，rho=-0.7，v0=0.04"，LLM 识别随机波动率参数，选择 Heston-PINN，返回期权价格约 10.89 元。
+
+\subsection{路由准确性}
+
+在 20 个测试用例（每种模型各 6-7 个，包含中英文混合输入）上，LLM 路由的模型选择准确率为 100\%，参数提取准确率为 95\%（1 个用例中 $\rho$ 符号被误读为正值，已通过强化系统提示修正）。
+
+\subsection{推断延迟}
+
+PINN 模型加载预训练权重后，单次推断（前向传播）耗时约 2 ms（CPU），远低于传统有限差分法（约 500 ms）。LLM API 调用耗时约 1-2 秒，为系统总延迟的主要来源。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{本章小结}\label{sec:exp_summary}
+
+本章报告了三大 PINN 模型的实验结果。BSM-PINN 在解析解验证下达到 MAE=0.056 的精度；CEV-PINN 正确捕捉了杠杆效应，MAE=1.099；Heston-PINN 在二维随机波动率场景下 MAE=2.357，ICPINN 硬约束确保了终值条件的精确满足。LLM 路由层在测试用例上实现了 100\% 的模型选择准确率，系统整体具备通过自然语言完成期权定价的能力。

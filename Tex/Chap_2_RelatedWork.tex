@@ -1,0 +1,106 @@
+\chapter{相关工作}\label{chap:related}
+
+本章从三个方向梳理与本文直接相关的已有工作：经典期权定价模型、物理信息神经网络（PINN）在期权定价中的应用，以及大语言模型（LLM）辅助科学计算的最新进展。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{期权定价模型}\label{sec:option_models}
+
+期权定价的核心问题是在给定标的资产动态假设下，求解期权价值所满足的偏微分方程（PDE）。
+
+\subsection{Black-Scholes-Merton 模型}
+
+Black、Scholes 与 Merton 于 1973 年提出了期权定价的奠基性框架\citep{black1973pricing,merton1973theory}。该模型假设标的资产价格 $S$ 服从几何布朗运动：
+\begin{equation}
+  dS = \mu S\,dt + \sigma S\,dW_t,
+\end{equation}
+其中 $\mu$ 为漂移率，$\sigma$ 为常数波动率，$W_t$ 为标准布朗运动。通过无套利原理，欧式期权价值 $V(S,t)$ 满足 Black-Scholes-Merton（BSM）方程：
+\begin{equation}\label{eq:bsm}
+  \frac{\partial V}{\partial t}
+  + \frac{1}{2}\sigma^2 S^2 \frac{\partial^2 V}{\partial S^2}
+  + rS\frac{\partial V}{\partial S}
+  - rV = 0,
+\end{equation}
+其中 $r$ 为无风险利率。欧式看涨期权具有解析解，可作为数值方法的精确基准。BSM 模型的主要局限在于假设波动率为常数，与市场中观测到的波动率微笑（volatility smile）现象不符。
+
+\subsection{常弹性方差模型}
+
+Cox 和 Ross\citep{cox1976valuation} 提出了常弹性方差（Constant Elasticity of Variance，CEV）模型，将 BSM 中的常数波动率推广为依赖于标的价格的局部波动率：
+\begin{equation}
+  dS = \mu S\,dt + \sigma S^{\beta}\,dW_t,
+\end{equation}
+其中 $\beta$ 为弹性参数。当 $\beta = 1$ 时退化为 BSM 模型；当 $\beta < 1$ 时，波动率随股价上涨而下降，能够捕捉股票市场中的杠杆效应。对应的期权定价 PDE 为：
+\begin{equation}\label{eq:cev}
+  \frac{\partial V}{\partial t}
+  + \frac{1}{2}\sigma^2 S^{2\beta} \frac{\partial^2 V}{\partial S^2}
+  + rS\frac{\partial V}{\partial S}
+  - rV = 0.
+\end{equation}
+CEV 模型一般情况下无闭合解析解，通常采用有限差分法或级数展开法求解。
+
+\subsection{Heston 随机波动率模型}
+
+Heston\citep{heston1993closed} 提出了随机波动率模型，将波动率本身建模为一个均值回归过程：
+\begin{align}
+  dS &= \mu S\,dt + \sqrt{v}\,S\,dW_t^S, \\
+  dv &= \kappa(\theta - v)\,dt + \xi\sqrt{v}\,dW_t^v,
+\end{align}
+其中 $v$ 为瞬时方差，$\kappa$ 为均值回归速度，$\theta$ 为长期均值，$\xi$ 为波动率的波动率（vol-of-vol），$dW_t^S$ 与 $dW_t^v$ 的相关系数为 $\rho$。期权价值 $V(S,v,t)$ 满足二维 PDE：
+\begin{equation}\label{eq:heston}
+  \frac{\partial V}{\partial t}
+  + \frac{1}{2}vS^2\frac{\partial^2 V}{\partial S^2}
+  + \rho\xi v S\frac{\partial^2 V}{\partial S\partial v}
+  + \frac{1}{2}\xi^2 v\frac{\partial^2 V}{\partial v^2}
+  + rS\frac{\partial V}{\partial S}
+  + \kappa(\theta-v)\frac{\partial V}{\partial v}
+  - rV = 0.
+\end{equation}
+Heston 模型具有半解析解（通过特征函数方法），但数值求解二维 PDE 的计算代价显著高于一维情形。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{物理信息神经网络}\label{sec:pinn}
+
+\subsection{基本原理}
+
+物理信息神经网络（Physics-Informed Neural Networks，PINN）由 Raissi 等人\citep{raissi2019physics}于 2019 年提出，其核心思想是将 PDE 的残差直接嵌入神经网络的损失函数，使网络在拟合边界条件的同时自动满足物理方程约束。对于一般形式的 PDE $\mathcal{F}[u] = 0$，PINN 的总损失为：
+\begin{equation}\label{eq:pinn_loss}
+  \mathcal{L} = w_{\text{pde}}\mathcal{L}_{\text{pde}}
+              + w_{\text{ic}}\mathcal{L}_{\text{ic}}
+              + w_{\text{bc}}\mathcal{L}_{\text{bc}},
+\end{equation}
+其中 $\mathcal{L}_{\text{pde}}$ 为配点处的 PDE 残差均方误差，$\mathcal{L}_{\text{ic}}$ 和 $\mathcal{L}_{\text{bc}}$ 分别为初值条件和边界条件的拟合误差，$w_{\text{pde}},w_{\text{ic}},w_{\text{bc}}$ 为权重超参数。PINN 的主要优势在于无需网格剖分，天然适合高维问题，且可同时求解正问题与反问题。
+
+\subsection{PINN 在期权定价中的应用}
+
+将 PINN 应用于期权定价是近年来的研究热点。Dhiman 和 Hu\citep{dhiman2023pinn} 率先将 PINN 应用于欧式和美式期权定价，提出了门控网络（gated network）结构，通过浅层分支与深层分支的加权组合分别捕捉解的简单特征与复杂特征，并与真实市场价格进行了对比验证。
+
+Zamxaka\citep{zamxaka2023cev} 在 MPhil 论文中系统研究了 PINN 对 BSM 和 CEV 模型的求解，构建了参数化 PINN，使单个网络可在不同参数设置下直接推断期权价格，无需重新训练。
+
+Bae 等人\citep{bae2024localvol} 将 PINN 扩展至 BSM、CEV 及 Dupire 局部波动率模型，实现了期权价格、Greeks 和局部波动率曲面的同步计算，验证了 PINN 在一族扩展 Black-Scholes 方程上的通用性。
+
+针对 Heston 随机波动率模型，Hainaut 和 Casas\citep{hainaut2024heston} 基于 Feynman-Kac 方程构建了参数化 PINN，通过对模型参数和合约特征（到期日）的联合参数化，实现了训练一次、多参数组合即时定价，相比蒙特卡洛和 FFT 方法具有显著的推断速度优势。
+
+在约束处理方面，Guo 等人\citep{guo2024icpinn} 提出了改进约束 PINN（ICPINN），通过输出变换将终值条件硬编码进网络结构，使终值条件精确满足而非近似满足，从而减少损失函数中的冲突项，加速收敛。Hadiasadeh 等人\citep{dcpinns2024} 提出了导数约束 PINN（DC-PINN），进一步处理含导数不等式约束的 PDE 问题。
+
+\subsection{现有工作的局限性}
+
+综合上述工作，现有 PINN 期权定价研究存在以下不足：
+\begin{enumerate}
+  \item \textbf{模型孤立}：各研究针对单一模型（BSM 或 Heston），缺乏统一框架同时支持多种定价模型；
+  \item \textbf{交互门槛高}：用户需手动指定模型类型和参数，无法通过自然语言描述需求；
+  \item \textbf{模型选择依赖专业知识}：不同市场条件下应选用何种模型，需要量化金融背景，普通用户难以判断。
+\end{enumerate}
+本文针对上述不足，提出将 PINN 与大语言模型相结合的统一期权定价框架。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{大语言模型辅助科学计算}\label{sec:llm_sci}
+
+大语言模型（Large Language Models，LLM）在科学计算领域的应用近年来取得了显著进展。Liu 等人\citep{liu2025pdeagent} 提出了 PDE-AGENT，一个工具链增强的多智能体框架，能够从自然语言描述出发，自动调用数值求解工具完成 PDE 的求解，并通过双循环纠错机制处理工具调用失败的情况。该工作表明 LLM 具备理解 PDE 问题结构、选择合适求解策略的能力。
+
+在金融领域，Xiao 等人\citep{xiao2024tradingagents} 提出了 TradingAgents 框架，通过多个专业化 LLM 智能体的协作完成金融交易决策，验证了 LLM 在金融场景下的参数提取与任务路由能力。
+
+上述工作表明，LLM 作为"智能路由层"具有良好的可行性：通过解析用户的自然语言输入，提取期权类型和定价参数，并将任务分发至对应的 PINN 求解器，可以显著降低期权定价工具的使用门槛。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{本章小结}\label{sec:related_summary}
+
+本章梳理了 BSM、CEV、Heston 三大期权定价模型的 PDE 形式，回顾了 PINN 在期权定价中的代表性工作，并介绍了 LLM 辅助科学计算的最新进展。现有 PINN 工作验证了神经网络求解期权定价 PDE 的可行性，但缺乏统一的多模型框架和自然语言交互能力。本文在此基础上，构建了 LLM 与 PINN 相结合的统一期权定价系统，具体方法见第~\ref{chap:method}~章。
