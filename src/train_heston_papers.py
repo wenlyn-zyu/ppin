@@ -120,7 +120,7 @@ def eval_icpinn(model=None):
 # V0 (initial variance) not in Table 6; use midpoint of V_RANGE = 0.276
 # ---------------------------------------------------------------------------
 HAINAUT_EVAL = dict(
-    S=100.0, V=0.276, t=1.0, T=1.0,   # t=T means "now" (no time elapsed)
+    S=100.0, V=0.276, t=0.0, T=1.0,   # t=0 means "now", t=T means at expiry
     r=0.04, kappa=1.15, theta=0.202, xi=0.20, rho=-0.40,
 )
 
