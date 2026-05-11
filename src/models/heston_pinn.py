@@ -151,47 +151,50 @@ class Heston_PINN:
 
     def _trial(self, S, v, tau):
         """
-        Networks output normalised price u = U/K.
-        Trial solution: u = A(S_n,v_n,tau_n) + S_n*tau_n * NN(S_n,v_n,tau_n)
-        B = S_n*tau_n vanishes at tau=0 and S=0, hard-encoding Dirichlet BCs.
-        Working in u=U/K units keeps all loss terms O(1) regardless of K.
+        Trial solution in u = U/K units.
+        u = payoff(S_n) + S_n*tau_n * [A(S_n,v_n,tau_n) + NN(S_n,v_n,tau_n)]
+
+        payoff(S_n) = max(S_n - 1/S_max*K, 0) = max(S/K - 1, 0) hard-encodes
+        the terminal condition exactly (no network needed for the kink).
+        B = S_n*tau_n vanishes at tau=0 and S=0, so the correction term
+        A+NN is free to learn the time-value without disturbing BCs.
+        AuxNet now fits the S=0 boundary correction only (much easier task).
         """
         S_n, v_n, tau_n = self._normalise(S, v, tau)
+        payoff = torch.clamp(S / self.K - 1.0, min=0.0)  # exact terminal payoff in u units
         A = self.aux_net(S_n, v_n, tau_n)
         N = self.main_net(S_n, v_n, tau_n)
         B = S_n * tau_n
-        return A + B * N   # returns u = U/K
+        return payoff + B * (A + N)   # returns u = U/K
 
     def _pretrain_aux(self, epochs=3000, n=5000, lr=5e-3):
         """
-        Pre-train aux_net on Dirichlet BCs in normalised u=U/K units.
-        Half the terminal samples are concentrated near S=K to resolve the
-        payoff kink, which is the hardest region for the network to fit.
+        Pre-train aux_net so that the trial solution satisfies BCs.
+        Since the terminal payoff is now hard-coded analytically, AuxNet only
+        needs to ensure the S=0 boundary is satisfied:
+          trial(0,v,tau) = payoff(0) + 0*tau_n*(A+N) = 0  (automatic)
+        So AuxNet just needs A(0,v,tau) to be well-behaved (near 0).
+        We also train it to output 0 at S=0 for all tau to keep the
+        correction term from blowing up near the boundary.
         """
         opt = torch.optim.Adam(self.aux_net.parameters(), lr=lr)
         for ep in range(1, epochs + 1):
             opt.zero_grad()
-            # terminal: tau=0, target = max(S/K - 1, 0)
-            # half uniform over [0, S_max], half concentrated near K (±20%)
-            n_half = n // 2
-            S_uniform = self._to(torch.FloatTensor(n_half, 1).uniform_(0, self.S_max))
-            S_near_K  = self._to(
-                self.K * (1.0 + torch.FloatTensor(n - n_half, 1).uniform_(-0.2, 0.2))
-            )
-            S_T = torch.cat([S_uniform, S_near_K], dim=0)
-            v_T   = self._to(torch.FloatTensor(n, 1).uniform_(0, self.v_max))
-            tau_T = self._to(torch.zeros(n, 1))
-            S_n, v_n, tau_n = self._normalise(S_T, v_T, tau_T)
-            target_T = torch.clamp(S_T / self.K - 1.0, min=0.0)
-            loss_T = torch.mean((self.aux_net(S_n, v_n, tau_n) - target_T) ** 2)
-            # lower boundary: S=0, target = 0
+            # S=0 boundary: A should be ~0 (correction term vanishes anyway via B=0)
             S_0   = self._to(torch.zeros(n, 1))
             v_0   = self._to(torch.FloatTensor(n, 1).uniform_(0, self.v_max))
             tau_0 = self._to(torch.FloatTensor(n, 1).uniform_(0, self.T))
             S_n0, v_n0, tau_n0 = self._normalise(S_0, v_0, tau_0)
             loss_0 = torch.mean(self.aux_net(S_n0, v_n0, tau_n0) ** 2)
 
-            loss = loss_T + loss_0
+            # Interior: A should be small (correction is handled by MainNet)
+            S_int   = self._to(torch.FloatTensor(n, 1).uniform_(0, self.S_max))
+            v_int   = self._to(torch.FloatTensor(n, 1).uniform_(0, self.v_max))
+            tau_int = self._to(torch.FloatTensor(n, 1).uniform_(0, self.T))
+            S_ni, v_ni, tau_ni = self._normalise(S_int, v_int, tau_int)
+            loss_int = 0.1 * torch.mean(self.aux_net(S_ni, v_ni, tau_ni) ** 2)
+
+            loss = loss_0 + loss_int
             loss.backward()
             opt.step()
             if ep % 500 == 0:
