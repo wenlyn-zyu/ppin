@@ -163,12 +163,22 @@ class Heston_PINN:
         return A + B * N   # returns u = U/K
 
     def _pretrain_aux(self, epochs=3000, n=5000, lr=5e-3):
-        """Pre-train aux_net on Dirichlet BCs in normalised u=U/K units."""
+        """
+        Pre-train aux_net on Dirichlet BCs in normalised u=U/K units.
+        Half the terminal samples are concentrated near S=K to resolve the
+        payoff kink, which is the hardest region for the network to fit.
+        """
         opt = torch.optim.Adam(self.aux_net.parameters(), lr=lr)
         for ep in range(1, epochs + 1):
             opt.zero_grad()
             # terminal: tau=0, target = max(S/K - 1, 0)
-            S_T   = self._to(torch.FloatTensor(n, 1).uniform_(0, self.S_max))
+            # half uniform over [0, S_max], half concentrated near K (±20%)
+            n_half = n // 2
+            S_uniform = self._to(torch.FloatTensor(n_half, 1).uniform_(0, self.S_max))
+            S_near_K  = self._to(
+                self.K * (1.0 + torch.FloatTensor(n - n_half, 1).uniform_(-0.2, 0.2))
+            )
+            S_T = torch.cat([S_uniform, S_near_K], dim=0)
             v_T   = self._to(torch.FloatTensor(n, 1).uniform_(0, self.v_max))
             tau_T = self._to(torch.zeros(n, 1))
             S_n, v_n, tau_n = self._normalise(S_T, v_T, tau_T)
