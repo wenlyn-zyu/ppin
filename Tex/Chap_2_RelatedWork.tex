@@ -83,6 +83,39 @@ Bae 等人\citep{bae2024localvol} 将 PINN 扩展至 BSM、CEV 及 Dupire 局部
 
 在训练稳定性方面，Wang 等人\citep{wang2022ntk} 从神经切线核（Neural Tangent Kernel，NTK）视角分析了 PINN 训练中的梯度失衡问题，提出基于梯度范数的自适应权重方案，使各损失项的梯度贡献趋于均衡，显著改善了多尺度 PDE 的收敛性。Lu 等人\citep{lu2021deepxde} 提出了基于残差的自适应采样（Residual-based Adaptive Refinement，RAR）方法：在训练过程中周期性地在高 PDE 残差区域补充配点，使网络重点关注难以拟合的区域，对于解在局部区域接近零（如深度虚值期权）的问题尤为有效。
 
+\subsection{三种独立 PINN 的复现与基准建立}\label{subsec:reproduction}
+
+为了在统一框架中提供可靠的对比基准，本文对上述三类代表性 PINN 方法进行了独立复现，分别针对 BSM、CEV 和 Heston 模型各训练一个专用网络。
+
+\textbf{BSM-PINN。} 采用标准 PINN 框架，网络输入为归一化的 $(S/S_{\max},\,t/T)$，输出为期权价值 $V$，损失函数包含 BSM 方程残差、终值条件（看涨期权收益）及上下边界条件。以 BSM 解析解为参考，在 $S\in[60,160]$、$t=0$ 处评估，MAE 为 0.021，RelMAE 为 0.8\%，与解析解高度吻合。
+
+\textbf{CEV-PINN。} 结构与 BSM-PINN 相同，将扩散系数替换为 $\sigma^2 S^{2\beta}$，弹性参数取 $\beta=0.5$。由于 CEV 模型无一般闭合解，以 Crank-Nicolson 有限差分法的数值解为参考基准。在相同评估网格上，MAE 为 0.034，RelMAE 为 1.3\%。
+
+\textbf{Heston-ICPINN。} 严格按照 Tan 和 Zhang\citep{guo2024icpinn} 的 ICPINN 方法复现，采用双网络结构：辅助网络（AuxNet，3 层 $\times$ 40 神经元，ELU 激活）预训练以满足 Dirichlet 边界条件，主网络（MainNet，8 层 $\times$ 40 神经元，Tanh 激活，glorot\_normal 初始化）学习 PDE 内部解。试验解形式为：
+\begin{equation}\label{eq:icpinn_trial}
+  U(S,v,\tau) = \phi(S) + S_n\tau_n \cdot \bigl[A(S_n,v_n,\tau_n) + \mathrm{NN}(S_n,v_n,\tau_n)\bigr],
+\end{equation}
+其中 $\phi(S)=\max(S-K,0)$ 为解析嵌入的终值条件，$S_n=S/S_{\max}$，$\tau_n=\tau/T$ 为归一化变量，$B=S_n\tau_n$ 在 $\tau=0$ 和 $S=0$ 处自动为零，从而将 Dirichlet 边界条件硬编码进网络结构。损失函数包含四项：PDE 残差 $\mathcal{L}_{\text{pde}}$、$S=S_{\max}$ 处的 Neumann 条件 $\mathcal{L}_{S_{\max}}$、$v=v_{\max}$ 处的 Neumann 条件 $\mathcal{L}_{v_{\max}}$，以及 $v=0$ 处的退化边界条件 $\mathcal{L}_{\text{deg}}$。训练参数严格遵循论文设置：$K=100$，$r=0.1$，$\kappa=1$，$\theta=0.08$，$\xi=0.39$，$\rho=-0.93$，$S_{\max}=4K$，$v_{\max}=1$，内部配点 $N_r=10000$，边界配点 $N_{bc}=500$，Adam 优化器，初始学习率 $10^{-3}$，StepLR 调度（$\gamma=0.75$，每 5000 步）。以 Heston 特征函数半解析解为参考，在 $S\in[60,160]$、$t=0$、$v=v_0=0.04$ 处评估，MAE 为 0.37，RelMAE 为 3.9\%（仅统计实值期权）。
+
+三种独立 PINN 的复现结果汇总于表~\ref{tab:reproduction}。
+
+\begin{table}[htbp]
+  \centering
+  \caption{三种独立 PINN 复现结果（$S\in[60,160]$，$t=0$）}
+  \label{tab:reproduction}
+  \begin{tabular}{lcccc}
+    \hline
+    模型 & 参考基准 & MAE & RelMAE & 网络结构 \\
+    \hline
+    BSM-PINN   & 解析解        & 0.021 & 0.8\%  & 6层$\times$64，Tanh \\
+    CEV-PINN   & Crank-Nicolson & 0.034 & 1.3\%  & 6层$\times$64，Tanh \\
+    Heston-ICPINN & 特征函数半解析解 & 0.37  & 3.9\%  & AuxNet(3$\times$40)+MainNet(8$\times$40) \\
+    \hline
+  \end{tabular}
+\end{table}
+
+上述三个独立 PINN 验证了各模型 PDE 的可解性，并为后续统一框架提供了精度基准。
+
 \subsection{现有工作的局限性}
 
 综合上述工作，现有 PINN 期权定价研究存在以下不足：

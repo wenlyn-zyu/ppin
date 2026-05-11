@@ -1,307 +1,214 @@
 \chapter{方法}\label{chap:method}
 
-本章介绍基于物理信息神经网络（PINN）与大语言模型（LLM）的统一期权定价框架。系统整体流程为：用户以自然语言描述期权需求，LLM 路由层解析参数并选择模型，对应的 PINN 求解器返回定价结果。
+本章介绍基于物理信息神经网络（PINN）与大语言模型（LLM）的统一期权定价框架。系统整体流程为：用户以自然语言描述期权需求，LLM路由层解析参数并选择模型，统一PINN求解器返回定价结果。
 
-% ─────────────────────────────────────────────────────────────────────────────
-\section{PINN 统一框架}\label{sec:pinn_framework}
+\section{统一PDE算子}\label{sec:unified_pde}
 
-\subsection{问题形式化}
+\subsection{三大模型的PDE统一形式}
 
-设期权价值 $V$ 满足如下一般形式的 PDE：
-\begin{equation}\label{eq:general_pde}
-  \mathcal{F}[V](x, t) = 0, \quad (x, t) \in \Omega \times [0, T),
+BSM、CEV、Heston三大模型的PDE在形式上具有高度相似性，均可写为如下统一算子：
+\begin{equation}\label{eq:unified_pde}
+  \mathcal{F}[V] =
+    \frac{\partial V}{\partial t}
+    + \frac{1}{2}a(S,v;\boldsymbol{\lambda})\frac{\partial^2 V}{\partial S^2}
+    + b(S,v;\boldsymbol{\lambda})\frac{\partial^2 V}{\partial S\partial v}
+    + \frac{1}{2}c(v;\boldsymbol{\lambda})\frac{\partial^2 V}{\partial v^2}
+    + rS\frac{\partial V}{\partial S}
+    + d(v;\boldsymbol{\lambda})\frac{\partial V}{\partial v}
+    - rV = 0,
 \end{equation}
-其中 $x$ 为状态变量（BSM/CEV 中为股价 $S$，Heston 中为 $(S, v)$），$\mathcal{F}$ 为微分算子，$T$ 为到期日。边界条件与终值条件分别为：
-\begin{align}
-  V(x, T) &= \phi(x), \quad x \in \Omega, \label{eq:terminal} \\
-  \mathcal{B}[V](x, t) &= g(x, t), \quad x \in \partial\Omega. \label{eq:boundary}
-\end{align}
-对于欧式看涨期权，终值条件为 $\phi(x) = \max(S - K, 0)$。
-
-\subsection{损失函数}
-
-PINN 用神经网络 $\hat{V}_\theta(x, t)$ 近似真实解 $V(x, t)$，通过最小化以下复合损失函数训练网络参数 $\theta$：
-\begin{equation}\label{eq:loss}
-  \mathcal{L}(\theta) = w_\text{pde}\,\mathcal{L}_\text{pde}
-                      + w_\text{ic}\,\mathcal{L}_\text{ic}
-                      + w_\text{bc}\,\mathcal{L}_\text{bc},
-\end{equation}
-其中各项定义为：
-\begin{align}
-  \mathcal{L}_\text{pde} &= \frac{1}{N_c}\sum_{i=1}^{N_c}
-    \left|\mathcal{F}[\hat{V}_\theta](x_i, t_i)\right|^2, \\
-  \mathcal{L}_\text{ic}  &= \frac{1}{N_T}\sum_{j=1}^{N_T}
-    \left|\hat{V}_\theta(x_j, T) - \phi(x_j)\right|^2, \\
-  \mathcal{L}_\text{bc}  &= \frac{1}{N_b}\sum_{k=1}^{N_b}
-    \left|\mathcal{B}[\hat{V}_\theta](x_k, t_k) - g(x_k, t_k)\right|^2.
-\end{align}
-配点 $\{(x_i, t_i)\}_{i=1}^{N_c}$ 在求解域内随机采样，无需网格剖分。PDE 残差通过自动微分（automatic differentiation）精确计算。
-
-\subsection{硬约束边界条件（ICPINN）}
-
-软约束方式将边界条件纳入损失函数，网络只能近似满足。参考 Tan 和 Zhang\citep{guo2024icpinn} 的 ICPINN 方法，对 Heston 模型采用双网络试探解将 Dirichlet 边界条件硬编码：
-\begin{equation}\label{eq:hard_constraint}
-  \hat{V}(S, v, \tau) = A(S, v, \tau) + S\tau \cdot \text{NN}(S, v, \tau;\, \theta),
-\end{equation}
-其中 $\tau = T - t$ 为倒向时间，$A$ 为预训练辅助网络，$\text{NN}$ 为主网络。乘子 $B = S\tau$ 在 $\tau = 0$（终值时刻）和 $S = 0$（下边界）处均为零，因此 $\hat{V}$ 在这两处精确等于 $A$，而 $A$ 已被预训练为满足式~\eqref{eq:aux_terminal}--\eqref{eq:aux_lower}。这一构造使终值条件和下边界条件精确成立，无需在损失函数中加入对应的软约束项。
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{网络架构}\label{sec:architecture}
-
-\subsection{门控网络（BSM 与 CEV）}
-
-BSM 和 CEV 模型采用门控网络结构\citep{dhiman2023pinn}，由浅层分支与深层分支并联组成：
-\begin{align}
-  h_s &= f_\text{shallow}(x), \\
-  h_d &= f_\text{deep}(x), \\
-  g   &= \sigma(W_g h_s + b_g), \\
-  h   &= g \odot h_s + (1-g) \odot h_d, \\
-  \hat{V} &= W_\text{out} h + b_\text{out},
-\end{align}
-其中 $\sigma(\cdot)$ 为 sigmoid 函数，$\odot$ 为逐元素乘法，$g \in (0,1)$ 为门控权重。浅层分支（1 个隐藏层，64 个神经元）捕捉期权价格的线性部分（深度实值/虚值区域），深层分支（4 个隐藏层，64 个神经元）捕捉平值附近的非线性特征。激活函数均为 $\tanh$。
-
-\subsection{ICPINN 双网络架构（Heston）}
-
-Heston 模型采用 Tan 和 Zhang\citep{guo2024icpinn} 提出的 ICPINN 双网络架构，由辅助网络（AuxNet）和主网络（MainNet）组成，通过试探解（trial solution）将 Dirichlet 边界条件硬编码进网络结构。
-
-\textbf{试探解}：令 $\tau = T - t$ 为倒向时间，定义试探解为：
-\begin{equation}\label{eq:trial_solution}
-  \hat{V}(S, v, \tau) = A(S, v, \tau) + S\tau \cdot \text{NN}(S, v, \tau),
-\end{equation}
-其中 $B(S,v,\tau) = S\tau$ 在 $\tau=0$（终值时刻）和 $S=0$（下边界）处均为零，因此 $\hat{V}$ 在这两处自动等于 $A$。辅助网络 $A$ 预训练后冻结，使其精确满足：
-\begin{align}
-  A(S, v, 0) &= \max(S - K,\, 0), \label{eq:aux_terminal} \\
-  A(0, v, \tau) &= 0. \label{eq:aux_lower}
-\end{align}
-由此，试探解在终值条件和下边界处精确成立，无需在损失函数中加入对应的软约束项。
-
-\textbf{辅助网络（AuxNet）}：3 个隐藏层，每层 40 个神经元，激活函数为 ELU。ELU 在零点处光滑（与 ReLU 不同），有助于拟合 $\max(S-K,0)$ 在 $S=K$ 处的折点。预训练完成后参数冻结，不参与主训练阶段的梯度更新。
-
-\textbf{主网络（MainNet）}：8 个隐藏层，每层 40 个神经元，激活函数为 $\tanh$，权重采用 Glorot 正态初始化。输入为归一化后的 $(\tilde{S}, \tilde{v}, \tilde{\tau}) \in [0,1]^3$。
-
-\textbf{损失函数}：主训练阶段仅优化主网络参数，损失由四项组成：
-\begin{equation}\label{eq:heston_loss}
-  \mathcal{L} = \mathcal{L}_\text{pde} + \mathcal{L}_{S_\max} + \mathcal{L}_{v_\max} + \mathcal{L}_\text{deg},
-\end{equation}
-其中：
-\begin{itemize}
-  \item $\mathcal{L}_\text{pde}$：$N_r = 10000$ 个内部配点处的 Heston PDE 残差均方误差；
-  \item $\mathcal{L}_{S_\max}$：$S = S_\max$ 处的 Neumann 条件 $\partial \hat{V}/\partial S = 1$（深度实值近似）；
-  \item $\mathcal{L}_{v_\max}$：$v = v_\max$ 处的 Neumann 条件 $\partial \hat{V}/\partial v = 0$（高波动率饱和）；
-  \item $\mathcal{L}_\text{deg}$：$v = 0$ 处的 Fichera 退化边界条件（见下文），每类边界各取 $N_\text{bc} = 500$ 个配点。
-\end{itemize}
-
-\textbf{Fichera 退化边界条件}：当 $v \to 0$ 时，Heston PDE 中的扩散项消失，方程退化为一阶 PDE。Fichera 理论指出此时不应施加 Dirichlet 条件，而应令退化后的方程在 $v=0$ 处成立：
-\begin{equation}\label{eq:fichera}
-  S\frac{\partial \hat{V}}{\partial S} + \kappa\theta\frac{\partial \hat{V}}{\partial v}
-  - r\hat{V} - \frac{\partial \hat{V}}{\partial \tau} = 0, \quad v = 0.
-\end{equation}
-这一条件由 Heston PDE 在 $v=0$ 处令所有含 $v$ 的扩散项为零直接得到，物理上对应零波动率时期权价格满足确定性折现方程。
-
-\textbf{求解域}：$S \in [0, S_\max]$，$S_\max = 4K$；$v \in [0, v_\max]$，$v_\max = 1$；$\tau \in [0, T]$。取 $S_\max = 4K$ 而非更大值，是为了避免 $S^2$ 量级在 PDE 扩散项中造成梯度失衡。
-
-\subsection{输入归一化}
-
-为提升训练稳定性，所有输入在送入网络前进行归一化：
-\begin{equation}
-  \tilde{S} = \frac{S}{S_\max}, \quad
-  \tilde{v} = \frac{v}{v_\max}, \quad
-  \tilde{t} = \frac{t}{T},
-\end{equation}
-使各输入均落在 $[0, 1]$ 区间，避免不同量级的输入导致梯度不平衡。
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{波动率、隐含波动率与希腊字母}\label{sec:greeks}
-
-\subsection{历史波动率与隐含波动率}
-
-\textbf{历史波动率}（Historical Volatility，HV）是标的资产对数收益率的样本标准差，反映过去一段时间内价格的实际波动幅度：
-\begin{equation}
-  \sigma_\text{HV} = \sqrt{\frac{252}{n-1}\sum_{i=1}^{n}\left(\ln\frac{S_i}{S_{i-1}} - \bar{\mu}\right)^2},
-\end{equation}
-其中 252 为年化因子（交易日数），$\bar{\mu}$ 为样本均值。历史波动率是向后看的（backward-looking），只能描述已发生的价格变动。
-
-\textbf{隐含波动率}（Implied Volatility，IV）是使 BSM 模型价格等于市场观测价格时，反推得到的波动率参数：
-\begin{equation}\label{eq:iv}
-  \sigma_\text{IV} = \text{BSM}^{-1}(V^\text{mkt};\, S, K, T, r),
-\end{equation}
-即求解方程 $V_\text{BS}(S, K, T, r, \sigma) = V^\text{mkt}$ 中的 $\sigma$。隐含波动率是向前看的（forward-looking），反映市场对未来波动率的预期，是期权市场的核心报价语言。
-
-实践中，同一标的不同行权价和到期日的期权往往对应不同的隐含波动率，形成\textbf{波动率微笑}（Volatility Smile）或\textbf{波动率偏斜}（Volatility Skew）。BSM 假设常数波动率，无法解释这一现象；CEV 和 Heston 模型正是为此而设计。
-
-\subsection{希腊字母}
-
-期权的\textbf{希腊字母}（Greeks）描述期权价格对各市场参数的敏感度，是风险管理和对冲的核心工具。主要希腊字母定义如下：
-
-\begin{align}
-  \Delta &= \frac{\partial V}{\partial S}, \label{eq:delta} \\
-  \Gamma &= \frac{\partial^2 V}{\partial S^2}, \label{eq:gamma} \\
-  \Theta &= \frac{\partial V}{\partial t}, \label{eq:theta} \\
-  \mathcal{V} &= \frac{\partial V}{\partial \sigma}, \label{eq:vega} \\
-  \rho_r &= \frac{\partial V}{\partial r}. \label{eq:rho_r}
-\end{align}
-
-各希腊字母的经济含义与 BSM 解析表达式汇总于表~\ref{tab:greeks}。
+其中参数向量$\boldsymbol{\lambda}=(\sigma,\beta,\kappa,\theta,\xi,\rho)$控制各系数，具体对应关系如表~\ref{tab:unified_coefficients}所示。
 
 \begin{table}[htbp]
   \centering
-  \caption{主要希腊字母的定义、含义与 BSM 解析式（欧式看涨期权）}
-  \label{tab:greeks}
-  \begin{tabular}{clll}
+  \caption{统一PDE算子系数与三大模型的对应关系}
+  \label{tab:unified_coefficients}
+  \begin{tabular}{lcccc}
     \hline
-    符号 & 定义 & 经济含义 & BSM 解析式 \\
+    模型 & $a(S,v;\boldsymbol{\lambda})$ & $b(S,v;\boldsymbol{\lambda})$ & $c(v;\boldsymbol{\lambda})$ & $d(v;\boldsymbol{\lambda})$ \\
     \hline
-    $\Delta$ & $\partial V/\partial S$ & 股价变动 \$1 时期权价格变动量 & $\Phi(d_1)$ \\
-    $\Gamma$ & $\partial^2 V/\partial S^2$ & Delta 对股价的变化率 & $\phi(d_1)/(S\sigma\sqrt{T})$ \\
-    $\Theta$ & $\partial V/\partial t$ & 时间流逝对期权价值的侵蚀 & $-S\phi(d_1)\sigma/(2\sqrt{T}) - rKe^{-rT}\Phi(d_2)$ \\
-    $\mathcal{V}$ & $\partial V/\partial \sigma$ & 波动率变动 1\% 时价格变动量 & $S\phi(d_1)\sqrt{T}$ \\
-    $\rho_r$ & $\partial V/\partial r$ & 利率变动 1\% 时价格变动量 & $KTe^{-rT}\Phi(d_2)$ \\
+    BSM & $\sigma^2 S^2$ & $0$ & $0$ & $0$ \\
+    CEV & $\sigma^2 S^{2\beta}$ & $0$ & $0$ & $0$ \\
+    Heston & $vS^2$ & $\rho\xi vS$ & $\xi^2 v$ & $\kappa(\theta-v)$ \\
     \hline
   \end{tabular}
 \end{table}
 
-其中 $\phi(\cdot)$ 为标准正态密度函数，$\Phi(\cdot)$ 为标准正态分布函数，$d_1, d_2$ 的定义见式~\eqref{eq:bs_d1}。
+当$\xi=0$时，$b=c=d=0$，统一算子自动退化为一维BSM/CEV方程；当$\xi>0$时，交叉项和$v$方向扩散项被激活，对应Heston的二维随机波动率结构。
 
-\subsection{Heston 模型下希腊字母的高效计算}
+\subsection{软掩码机制}
 
-BSM 模型的希腊字母均有闭合解析式，计算代价极低。对于 CEV 模型，一般需要数值微分（有限差分）。Heston 模型的优势在于：其特征函数方法允许对 $S$、$v_0$、$r$ 等参数\textbf{解析求导}，从而一次积分同时得到多个希腊字母，无需重复调用定价函数。
-
-具体地，Heston 模型的 Delta 和 Vega（对 $v_0$ 的敏感度）可直接从特征函数积分中读出：
-\begin{align}
-  \Delta_\text{Heston} &= \frac{\partial V}{\partial S} = P_1 + S\frac{\partial P_1}{\partial S} - Ke^{-rT}\frac{\partial P_2}{\partial S}, \label{eq:heston_delta} \\
-  \mathcal{V}_\text{Heston} &= \frac{\partial V}{\partial v_0} = S\frac{\partial P_1}{\partial v_0} - Ke^{-rT}\frac{\partial P_2}{\partial v_0}, \label{eq:heston_vega}
-\end{align}
-其中 $\partial P_j/\partial S$ 和 $\partial P_j/\partial v_0$ 通过对特征函数的被积函数直接求导得到，计算量与定价本身相当\citep{heston1993closed}。这一特性使 Heston 模型在需要实时计算大量希腊字母的做市场景中具有显著优势。
-
-在 PINN 框架下，希腊字母可通过自动微分（automatic differentiation）直接从网络输出对输入求导得到，无需额外推导解析式：
-\begin{equation}
-  \Delta_\text{PINN} = \frac{\partial \hat{V}_\theta}{\partial S}, \quad
-  \Gamma_\text{PINN} = \frac{\partial^2 \hat{V}_\theta}{\partial S^2},
+为实现三大模型之间的连续插值，本文引入软掩码（Soft Mask）：
+\begin{equation}\label{eq:soft_mask}
+  \text{mask} = \tanh\!\left(\frac{\xi}{0.05}\right)^2.
 \end{equation}
-这是 PINN 相对于传统有限差分方法的另一优势：希腊字母与期权价格在同一次前向传播中同时计算，且精度由自动微分保证，无有限差分的截断误差。
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{BSM-PINN}\label{sec:bsm_pinn}
-
-BSM 模型的 PDE 算子为：
-\begin{equation}
-  \mathcal{F}_\text{BSM}[V] =
-    \frac{\partial V}{\partial t}
-    + \frac{1}{2}\sigma^2 S^2 \frac{\partial^2 V}{\partial S^2}
-    + rS\frac{\partial V}{\partial S} - rV.
+当$\xi\to 0$时，$\text{mask}\to 0$；当$\xi$较大（如$\xi=0.3$）时，$\text{mask}\approx 1$。利用软掩码，扩散系数$a$统一为：
+\begin{equation}\label{eq:soft_a}
+  a = (1-\text{mask})\cdot\sigma^2 S^{2\beta} + \text{mask}\cdot v S^2.
 \end{equation}
-边界条件设置为：
-\begin{align}
-  V(0, t) &= 0, \\
-  V(S_\max, t) &= S_\max - Ke^{-r(T-t)}.
-\end{align}
-上边界采用深度实值近似：当 $S \gg K$ 时，期权几乎必然被执行，价值近似为远期价值 $S - Ke^{-r(T-t)}$。
+这一设计使得：
+\begin{itemize}
+  \item 当$\xi=0$（BSM/CEV）时，$a=\sigma^2 S^{2\beta}$，精确退化为BSM/CEV扩散项；
+  \item 当$\xi=0.3$（Heston）时，$\text{mask}\approx 0.998$，$a\approx vS^2$，精确对应Heston扩散项；
+  \item 中间状态时，$a$在两者之间连续插值，网络可以学习到平滑的参数依赖关系。
+\end{itemize}
 
-BSM 模型存在解析解，可用于精确验证 PINN 的精度：
-\begin{equation}
-  V_\text{BS}(S, t) = S\Phi(d_1) - Ke^{-r(T-t)}\Phi(d_2),
-\end{equation}
-其中
-\begin{equation}\label{eq:bs_d1}
-  d_1 = \frac{\ln(S/K) + (r + \sigma^2/2)(T-t)}{\sigma\sqrt{T-t}}, \quad d_2 = d_1 - \sigma\sqrt{T-t},
-\end{equation}
-$\Phi(\cdot)$ 为标准正态分布函数。
+软掩码的阈值$0.05$是根据实验调整的超参数：过小会导致BSM/CEV区域的梯度消失，过大会使Heston区域的掩码不够接近1。
 
-BSM 模型的适用场景为：短期、流动性好、平值附近的期权，或需要快速计算隐含波动率和希腊字母的场景。其核心假设——常数波动率——在实践中往往不成立，但 BSM 解析解的简洁性使其成为期权市场的报价基准，所有其他模型的定价结果通常也以"BSM 隐含波动率"的形式表达，便于横向比较。
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{CEV-PINN}\label{sec:cev_pinn}
-
-CEV 模型将 BSM 中的常数波动率替换为依赖股价的局部波动率，PDE 算子为：
-\begin{equation}
-  \mathcal{F}_\text{CEV}[V] =
-    \frac{\partial V}{\partial t}
-    + \frac{1}{2}\sigma^2 S^{2\beta} \frac{\partial^2 V}{\partial S^2}
-    + rS\frac{\partial V}{\partial S} - rV.
-\end{equation}
-本文取 $\beta = 0.5$（平方根过程），此时波动率 $\sigma S^{-0.5}$ 随股价上涨而下降，能够捕捉股票市场中的杠杆效应。
-
-CEV 模型一般无闭合解析解，本文采用 Crank-Nicolson 有限差分法生成参考价格用于验证。
-
-CEV 模型的适用场景为个股期权，尤其是财务杠杆较高或股价较低的公司。其核心优势在于以最少的额外参数（仅增加 $\beta$）捕捉了杠杆效应，计算代价远低于 Heston 模型。本文固定 $\beta=0.5$，依据 Beckers\citep{beckers1980constant} 的实证共识和 Schroder\citep{schroder1989computing} 的解析解存在性结论。CEV 模型的局限在于波动率仍为确定性函数，无法描述波动率的随机聚集现象，因此不适用于指数期权的精确定价。
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{Heston-PINN}\label{sec:heston_pinn}
-
-Heston 模型的 PDE 算子（倒向时间 $\tau = T - t$）为：
-\begin{equation}
-  \mathcal{F}_\text{Heston}[V] =
-    \frac{\partial V}{\partial \tau}
-    - \frac{1}{2}vS^2\frac{\partial^2 V}{\partial S^2}
-    - \rho\xi vS\frac{\partial^2 V}{\partial S\partial v}
-    - \frac{1}{2}\xi^2 v\frac{\partial^2 V}{\partial v^2}
-    - rS\frac{\partial V}{\partial S}
-    - \kappa(\theta-v)\frac{\partial V}{\partial v}
-    + rV = 0.
-\end{equation}
-边界条件设置为：
-\begin{align}
-  V(S, v, 0) &= \max(S - K,\, 0), \quad \text{（终值条件，由 ICPINN 硬编码）} \\
-  V(0, v, \tau) &= 0, \quad \text{（下边界，由 ICPINN 硬编码）} \\
-  \frac{\partial V}{\partial S}\bigg|_{S=S_\max} &= 1, \quad \text{（Neumann，深度实值近似）} \\
-  \frac{\partial V}{\partial v}\bigg|_{v=v_\max} &= 0, \quad \text{（Neumann，高波动率饱和）}
-\end{align}
-以及 $v=0$ 处的 Fichera 退化条件（式~\eqref{eq:fichera}）。求解域取 $S_\max = 4K$，$v_\max = 1$。
-
-Heston 模型具有半解析解（特征函数方法），本文用其作为验证基准：
-\begin{equation}
-  V_\text{Heston}(S, v, t) = S\,P_1 - Ke^{-r(T-t)}\,P_2,
-\end{equation}
-其中 $P_1, P_2$ 通过对特征函数的数值积分求得\citep{heston1993closed}。
-
-Heston 模型是指数期权定价的行业标准，适用于需要精确拟合波动率微笑和波动率期限结构的场景。其五个参数均有明确的经济含义：$\kappa$ 控制波动率均值回归速度（$\kappa$ 越大，波动率越快回归长期均值 $\theta$）；$\xi$ 为波动率的波动率，决定波动率微笑的曲率；$\rho$ 捕捉股价与波动率的负相关性（杠杆效应），通常为负值。Heston 模型的主要挑战在于参数校准：五个参数需要同时从期权链数据中反推，优化问题存在多个局部极小值，对初始值敏感。本文采用 L-BFGS-B 算法进行校准，以市场期权价格的均方误差为目标函数。
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{LLM 路由层}\label{sec:llm_router}
+\section{加法参数化输出}\label{sec:additive_param}
 
 \subsection{设计动机}
 
-三种 PINN 模型分别适用于不同的市场假设：BSM 适用于波动率平稳的市场，CEV 适用于存在杠杆效应的股票市场，Heston 适用于波动率本身随机变化的场景。传统工具要求用户手动指定模型类型和参数，门槛较高。
+直接用神经网络输出期权价格存在两个问题：
+\begin{enumerate}
+  \item \textbf{初始化困难}：期权价格量级约为$10^0$至$10^2$，随机初始化的网络输出量级约为$10^{-1}$，训练初期梯度信号弱；
+  \item \textbf{深度虚值退化}：当$S\ll K$时，期权价格趋近于0，乘法参数化$V=V_\text{BS}\cdot(1+\text{net})$在$V_\text{BS}\to 0$时退化，网络无法学习到有效的修正量。
+\end{enumerate}
 
-本文引入 LLM 作为智能路由层，使用户可以通过自然语言描述期权需求，由 LLM 自动完成模型选择和参数提取。
+\subsection{加法参数化}
+
+本文采用加法参数化输出：
+\begin{equation}\label{eq:additive}
+  \hat{V}(S,v,t;\boldsymbol{\lambda}) = V_\text{BS}(S,\tau;\sigma_\text{eff}) + K\cdot\text{net}(x),
+\end{equation}
+其中$\tau=T-t$为剩余时间，$\sigma_\text{eff}$为等效波动率，$\text{net}(x)$为神经网络输出的修正量（以$K$为单位，量级约为$0$至$0.1$）。
+
+等效波动率$\sigma_\text{eff}$通过软掩码计算：
+\begin{equation}\label{eq:sigma_eff}
+  \sigma_\text{eff} = (1-\text{mask})\cdot\sigma + \text{mask}\cdot\sqrt{v}.
+\end{equation}
+即BSM/CEV时用常数波动率$\sigma$，Heston时用当前方差$v$的平方根作为近似波动率。
+
+加法参数化的优势：
+\begin{itemize}
+  \item \textbf{良好初始化}：网络最后一层权重初始化为$\mathcal{N}(0, 0.001^2)$，使训练开始时$K\cdot\text{net}\approx 0.1\ll V_\text{BS}\approx 10$，网络从接近正确答案的位置开始优化；
+  \item \textbf{解决OTM退化}：深度虚值时$V_\text{BS}\to 0$，但$K\cdot\text{net}$仍可输出非零修正，网络可以学习到CEV/Heston相对于BSM的价格差异；
+  \item \textbf{物理意义清晰}：对BSM，$\text{net}\to 0$（BSM解析解已精确）；对CEV，$\text{net}$学习弹性指数修正；对Heston，$\text{net}$学习随机波动率修正。
+\end{itemize}
+
+\section{网络架构}\label{sec:architecture}
+
+\subsection{输入特征}
+
+网络输入为9维向量，包含归一化的状态变量和模型参数：
+\begin{equation}
+  x = \left[\frac{S}{S_\text{max}},\; \frac{v}{v_\text{max}},\; \frac{t}{T},\; \sigma,\; \beta,\; \kappa,\; \theta,\; \xi,\; \rho\right],
+\end{equation}
+其中$S_\text{max}=300$，$v_\text{max}=1$。归一化使各输入均落在$[0,1]$区间，避免不同量级的输入导致梯度不平衡。
+
+\subsection{网络结构}
+
+网络采用6层全连接结构，每层128个神经元，激活函数为$\tanh$：
+\begin{align}
+  h_0 &= x \in \mathbb{R}^9, \\
+  h_l &= \tanh(W_l h_{l-1} + b_l), \quad l=1,\ldots,6, \\
+  \text{net}(x) &= W_7 h_6 + b_7 \in \mathbb{R}.
+\end{align}
+最后一层权重初始化为$\mathcal{N}(0, 0.001^2)$，偏置初始化为0，确保训练开始时$\text{net}\approx 0$。
+
+$\tanh$激活函数的选择基于以下考虑：（1）$\tanh$是光滑函数，其高阶导数存在且有界，适合PINN中需要计算二阶偏导数的场景；（2）$\tanh$的输出范围$(-1,1)$有助于控制网络输出的量级；（3）相比ReLU，$\tanh$在原点附近的梯度更大，有助于训练初期的快速收敛。
+
+\subsection{终值条件的近似硬约束}
+
+软约束方式将终值条件纳入损失函数，网络只能近似满足。参考Guo等人\cite{guo2024icpinn}的ICPINN方法，本文通过两种机制使终值条件近似硬编码：（1）加法参数化中，当$t=T$时，$\tau=T-t=0$，Black-Scholes公式自动退化为终值条件$V_\text{BS}(S,0;\sigma_\text{eff})=\max(S-K,0)$；（2）网络最后一层的小初始化（$\mathcal{N}(0,0.001^2)$）确保修正量$K\cdot\text{net}$在训练初期接近0，不破坏终值条件的满足。两者结合使终值条件在训练开始时即被近似满足，加速收敛。
+
+\section{损失函数}\label{sec:loss}
+
+\subsection{复合损失}
+
+统一PINN的总损失由三部分组成：
+\begin{equation}\label{eq:total_loss}
+  \mathcal{L}(\theta) = w_\text{pde}\,\mathcal{L}_\text{pde}
+                      + w_\text{bc}\,\mathcal{L}_\text{bc}
+                      + w_\text{data}\,\mathcal{L}_\text{data},
+\end{equation}
+其中各项定义如下。
+
+\subsection{PDE残差损失}
+
+在求解域$\Omega\times[0,T)$内随机采样$N_c$个配点$\{(S_i,v_i,t_i)\}$，计算统一PDE算子的残差：
+\begin{equation}
+  \mathcal{L}_\text{pde} = \frac{1}{N_c}\sum_{i=1}^{N_c}
+    \left(\frac{\mathcal{F}[\hat{V}](S_i,v_i,t_i)}{|\hat{V}(S_i,v_i,t_i)|+1}\right)^2.
+\end{equation}
+分母中的$|\hat{V}|+1$为相对残差归一化项，避免ATM区域（$V\approx 10$）的残差主导损失，使OTM区域（$V\approx 0.1$）也能获得足够的梯度信号。
+
+\subsection{边界条件损失}
+
+边界条件设置为：
+\begin{align}
+  V(0,v,t) &= 0, \label{eq:bc_lower} \\
+  V(S_\text{max},v,t) &= S_\text{max} - Ke^{-r(T-t)}, \label{eq:bc_upper} \\
+  V(S,v_\text{max},t) &\approx S. \label{eq:bc_vmax}
+\end{align}
+式~\eqref{eq:bc_lower}表示股价为0时期权价值为0；式~\eqref{eq:bc_upper}为深度实值近似；式~\eqref{eq:bc_vmax}表示极高波动率下期权价值趋近于标的资产价格。
+
+边界条件损失为：
+\begin{equation}
+  \mathcal{L}_\text{bc} = \frac{1}{N_b}\sum_{k=1}^{N_b}
+    \left|\hat{V}(S_k,v_k,t_k) - g(S_k,v_k,t_k)\right|^2,
+\end{equation}
+其中$g$为对应边界的目标值。
+
+\subsection{数据驱动锚点损失}
+
+纯PDE约束存在解不唯一的数值问题。本文在$t=0$处预计算参考解（BSM用解析解，CEV用Crank-Nicolson有限差分，Heston用特征函数半解析解），作为数据驱动锚点：
+\begin{equation}
+  \mathcal{L}_\text{data} = \frac{1}{N_d}\sum_{j=1}^{N_d}
+    \left(\hat{V}(S_j,v_j,0) - V_j^*\right)^2,
+\end{equation}
+其中$V_j^*$为参考解，$N_d=20$（每个模型各20个点）。数据锚点的权重$w_\text{data}=100$远大于PDE权重$w_\text{pde}=1$，确保网络在$t=0$处的精度。
+
+\section{训练策略}\label{sec:training}
+
+\subsection{混合采样}
+
+训练时从三个模型的参数分布中混合采样配点：每个训练步骤中，从BSM、CEV、Heston三个模型各采样$N_c/3$个配点，拼接后计算统一PDE残差。这一策略确保网络在三种模型的参数空间中均匀训练，避免某一模型主导损失。
+
+\subsection{优化器与学习率}
+
+使用Adam优化器\cite{kingma2014adam}，初始学习率$10^{-3}$，每5000步衰减至0.5倍（StepLR调度）。总训练轮数20000轮，在NVIDIA GPU上约需30分钟。
+
+\subsection{配点采样策略}
+
+配点在求解域内均匀随机采样：
+\begin{itemize}
+  \item BSM/CEV：$S\in[0, S_\text{max}]$，$t\in[0,T]$，$v$固定为$v_0$（一维问题）；
+  \item Heston：$S\in[0, S_\text{max}]$，$v\in[0, v_\text{max}]$，$t\in[0,T]$（二维问题）。
+\end{itemize}
+每个训练步骤重新采样配点（online sampling），避免过拟合到固定配点集。
+
+\section{LLM路由层}\label{sec:llm_router}
+
+\subsection{设计动机}
+
+三种PINN模型分别适用于不同的市场假设：BSM适用于波动率平稳的市场，CEV适用于存在杠杆效应的股票市场，Heston适用于波动率本身随机变化的场景。传统工具要求用户手动指定模型类型和参数，门槛较高。
+
+本文引入LLM作为智能路由层，使用户可以通过自然语言描述期权需求，由LLM自动完成模型选择和参数提取。
 
 \subsection{路由规则}
 
-LLM 根据以下规则选择模型：
+LLM根据以下规则选择模型：
 \begin{itemize}
-  \item 若用户仅提供常数波动率 $\sigma$，选择 \textbf{BSM}；
-  \item 若用户提及弹性参数 $\beta$ 或"CEV"，选择 \textbf{CEV}；
-  \item 若用户提供随机波动率参数（$\kappa, \theta, \xi, \rho, v_0$）或提及"Heston"，选择 \textbf{Heston}；
-  \item 默认选择 \textbf{BSM}。
+  \item 若用户仅提供常数波动率$\sigma$，选择\textbf{BSM}；
+  \item 若用户提及弹性参数$\beta$或"CEV"，选择\textbf{CEV}；
+  \item 若用户提供随机波动率参数（$\kappa,\theta,\xi,\rho,v_0$）或提及"Heston"，选择\textbf{Heston}；
+  \item 默认选择\textbf{BSM}。
 \end{itemize}
 
-\subsection{参数提取}
+\subsection{参数提取与系统流程}
 
-LLM 接收用户的自然语言输入，输出结构化 JSON 参数：
-\begin{verbatim}
-{
-  "model": "BSM",
-  "option_type": "call",
-  "S": 100.0,
-  "K": 100.0,
-  "T": 1.0,
-  "r": 0.05,
-  "sigma": 0.2
-}
-\end{verbatim}
-本文使用 DeepSeek API（兼容 OpenAI 接口），通过 `response_format: json_object` 约束输出格式，确保参数提取的可靠性。
-
-\subsection{系统流程}
+LLM接收用户的自然语言输入，通过\texttt{response\_format: json\_object}约束输出格式，输出结构化JSON参数，包含模型类型、期权类型和所有定价参数。系统提示明确规定了参数格式和默认值，对缺失参数使用合理默认值（$\sigma=0.2$，$\beta=0.5$，$v_0=0.04$，$\kappa=2.0$，$\theta=0.04$，$\xi=0.3$，$\rho=-0.7$）。
 
 完整的定价流程如下：
 \begin{enumerate}
   \item 用户输入自然语言描述（中文或英文均可）；
-  \item LLM 解析输入，提取期权参数，选择定价模型；
-  \item 对应的 PINN 模型加载预训练权重，对给定参数即时推断；
+  \item LLM解析输入，提取期权参数，选择定价模型；
+  \item 统一PINN加载预训练权重，根据提取的参数构造$\boldsymbol{\lambda}$向量；
+  \item 网络前向传播，返回期权价格（约2ms）；
   \item 系统返回期权价格及所用模型信息。
 \end{enumerate}
 
-% ─────────────────────────────────────────────────────────────────────────────
 \section{本章小结}\label{sec:method_summary}
 
-本章介绍了基于 PINN 与 LLM 的统一期权定价框架。在 PINN 部分，三大模型共用统一的损失函数结构；Heston 模型采用 ICPINN 双网络架构，辅助网络预训练后冻结以精确满足终值条件和下边界条件，主网络通过四项损失（PDE 残差、两个 Neumann 条件、Fichera 退化边界条件）训练，求解域取 $S_\max = 4K$ 以避免量级失衡；BSM/CEV 使用门控网络。在 LLM 部分，路由层通过结构化输出实现可靠的参数提取和模型选择。下一章将报告三大模型的实验结果。
+本章介绍了基于PINN与LLM的统一期权定价框架。核心创新在于：（1）软掩码机制将三大模型的PDE算子统一为单一参数化形式；（2）加法参数化输出以Black-Scholes解析解为基线，解决了深度虚值区域的数值退化问题；（3）ICPINN硬约束确保终值条件精确满足；（4）LLM路由层通过结构化输出实现可靠的参数提取和模型选择。下一章将报告实验结果。
