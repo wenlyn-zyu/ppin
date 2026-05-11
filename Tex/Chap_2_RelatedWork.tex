@@ -81,6 +81,8 @@ Bae 等人\citep{bae2024localvol} 将 PINN 扩展至 BSM、CEV 及 Dupire 局部
 
 在约束处理方面，Guo 等人\citep{guo2024icpinn} 提出了改进约束 PINN（ICPINN），通过输出变换将终值条件硬编码进网络结构，使终值条件精确满足而非近似满足，从而减少损失函数中的冲突项，加速收敛。Hadiasadeh 等人\citep{dcpinns2024} 提出了导数约束 PINN（DC-PINN），进一步处理含导数不等式约束的 PDE 问题。
 
+在训练稳定性方面，Wang 等人\citep{wang2022ntk} 从神经切线核（Neural Tangent Kernel，NTK）视角分析了 PINN 训练中的梯度失衡问题，提出基于梯度范数的自适应权重方案，使各损失项的梯度贡献趋于均衡，显著改善了多尺度 PDE 的收敛性。Lu 等人\citep{lu2021deepxde} 提出了基于残差的自适应采样（Residual-based Adaptive Refinement，RAR）方法：在训练过程中周期性地在高 PDE 残差区域补充配点，使网络重点关注难以拟合的区域，对于解在局部区域接近零（如深度虚值期权）的问题尤为有效。
+
 \subsection{现有工作的局限性}
 
 综合上述工作，现有 PINN 期权定价研究存在以下不足：

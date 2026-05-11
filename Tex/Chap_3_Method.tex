@@ -62,7 +62,29 @@ BSM 和 CEV 模型采用门控网络结构\citep{dhiman2023pinn}，由浅层分�
 
 \subsection{深层全连接网络（Heston）}
 
-Heston 模型输入维度为 3（$S, v, t$），采用 6 层全连接网络，每层 128 个神经元，激活函数为 $\tanh$，并结合式~\eqref{eq:hard_constraint}~的硬约束输出变换。
+Heston 模型输入维度为 3（$S, v, t$），采用对数价格变换与 Fourier 特征嵌入的改进架构，并结合式~\eqref{eq:hard_constraint}~的硬约束输出变换。
+
+\textbf{对数价格变换}：将股价输入从 $S \in [0, S_\max]$ 变换为对数坐标 $x = \ln(S/K)$，使 PDE 扩散项从 $\frac{1}{2}vS^2 V_{SS}$ 变为 $\frac{1}{2}v V_{xx}$，消除了 $S^2$ 量级失衡。在对数坐标下，Heston PDE 变为：
+\begin{equation}\label{eq:heston_logprice}
+  \frac{\partial V}{\partial t}
+  + \frac{1}{2}v\frac{\partial^2 V}{\partial x^2}
+  + \left(r - \frac{1}{2}v\right)\frac{\partial V}{\partial x}
+  + \rho\xi v\frac{\partial^2 V}{\partial x\partial v}
+  + \frac{1}{2}\xi^2 v\frac{\partial^2 V}{\partial v^2}
+  + \kappa(\theta-v)\frac{\partial V}{\partial v}
+  - rV = 0.
+\end{equation}
+
+\textbf{Fourier 特征嵌入}：在输入层加入随机 Fourier 特征映射 $\gamma(x) = [\sin(Bx), \cos(Bx)]$（$B \in \mathbb{R}^{3 \times n_f}$ 为随机矩阵，$n_f=16$），提升网络对高频分量的表达能力，有助于捕捉平值附近的非线性特征。
+
+\textbf{网络结构}：8 层全连接网络，每层 128 个神经元，激活函数为 $\tanh$，输入为 Fourier 嵌入后的 32 维特征向量。
+
+\textbf{自适应损失权重}：训练过程中每 1000 步根据各损失项的梯度范数动态调整权重（Wang 等人\citep{wang2022ntk}），防止边界条件损失被 PDE 残差损失淹没：
+\begin{equation}
+  w_i \leftarrow \frac{\sum_j \|\nabla_\theta \mathcal{L}_j\|}{\|\nabla_\theta \mathcal{L}_i\|}.
+\end{equation}
+
+\textbf{RAR 自适应采样}：每 2000 步根据当前 PDE 残差大小，在高残差区域（深度虚值 $S \ll K$）补充配点，强制网络关注接近零的期权价格区域（Lu 等人\citep{lu2021deepxde}）。
 
 \subsection{输入归一化}
 
