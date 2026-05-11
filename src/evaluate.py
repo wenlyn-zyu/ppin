@@ -27,7 +27,7 @@ def eval_bsm():
     m = BSM_PINN(K=100, T=1.0, r=0.05, sigma=0.2, S_max=300)
     m.load(os.path.join(CKPT_DIR, "bsm_pinn.pt"))
 
-    spots = np.linspace(60, 160, 21)
+    spots = np.linspace(60, 160, 50)
     pinn_prices, bs_prices, errors = [], [], []
     for S in spots:
         p = m.price(S, t=0.0)
@@ -100,11 +100,11 @@ def eval_cev():
 
 
 def eval_heston():
-    print("\n── Heston evaluation ───────────────────────────────────")
-    m = Heston_PINN(K=100, T=1.0, r=0.05,
-                    kappa=2.0, theta=0.04, xi=0.3, rho=-0.7, v0=0.04,
-                    S_max=300, v_max=1.0)
-    m.load(os.path.join(CKPT_DIR, "heston_pinn.pt"))
+    print("\n── Heston-ICPINN evaluation (Tan & Zhang 2026 params) ──")
+    m = Heston_PINN(K=100, T=1.0, r=0.1,
+                    kappa=1.0, theta=0.08, xi=0.39, rho=-0.93, v0=0.04,
+                    S_max=400, v_max=1.0)
+    m.load(os.path.join(CKPT_DIR, "heston_icpinn.pt"))
 
     spots = np.linspace(60, 160, 21)
     pinn_prices, heston_prices, errors = [], [], []
@@ -127,12 +127,12 @@ def eval_heston():
     axes[0].plot(spots, pinn_prices, "r--", label="Heston-PINN")
     axes[0].set_xlabel("Spot price S")
     axes[0].set_ylabel("Option price V")
-    axes[0].set_title("Heston-PINN vs Semi-analytical")
+    axes[0].set_title("Heston-ICPINN vs Semi-analytical (Tan & Zhang 2026)")
     axes[0].legend()
     axes[1].plot(spots, errors, "b-o")
     axes[1].set_xlabel("Spot price S")
     axes[1].set_ylabel("Absolute error")
-    axes[1].set_title(f"Heston absolute error (MAE={mae:.4f})")
+    axes[1].set_title(f"Heston-ICPINN absolute error (MAE={mae:.4f})")
     plt.tight_layout()
     plt.savefig(os.path.join(RESULTS_DIR, "heston_eval.pdf"), dpi=150)
     plt.close()
