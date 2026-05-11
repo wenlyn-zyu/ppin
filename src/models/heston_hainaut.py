@@ -285,14 +285,14 @@ class HestonHainaut:
         """
         Price a put option.
         t: current time (t=T means 'now', t=0 means at expiry)
-        Network output is price/K_STRIKE; multiply back to get actual price.
+        Network output is the raw put price (same units as S and K_STRIKE).
         """
         self.net.eval()
         def _t(v): return self._to(torch.tensor([[float(v)]], dtype=torch.float32))
         with torch.no_grad():
             out = self._forward(_t(t), _t(S), _t(V), _t(r),
                                 _t(kappa), _t(theta), _t(xi), _t(rho), _t(T))
-        return out.item() * self.K_STRIKE
+        return out.item()
 
     def save(self, path):
         torch.save({
