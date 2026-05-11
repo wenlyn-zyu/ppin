@@ -223,7 +223,7 @@ class Heston_PINN:
           3. Loss = L_pde + L_Smax + L_vmax + L_deg
         """
         print("Pre-training auxiliary network on Dirichlet BCs...")
-        self._pretrain_aux(epochs=pretrain_epochs)
+        self._pretrain_aux(epochs=pretrain_epochs, lr=lr)
         for p in self.aux_net.parameters():
             p.requires_grad_(False)
 
