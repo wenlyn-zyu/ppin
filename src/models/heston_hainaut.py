@@ -203,9 +203,9 @@ class HestonHainaut:
         F_VV = torch.autograd.grad(F_V, V, grad_outputs=torch.ones_like(F_V), create_graph=True)[0]
         F_SV = torch.autograd.grad(F_S, V, grad_outputs=torch.ones_like(F_S), create_graph=True)[0]
 
-        b_h = 1.0 / self.T_RANGE[1]   # = 1/5
-
-        res = (b_h * F_t
+        # b_h is NOT needed here: t.requires_grad_(True) + z-score normalisation
+        # means autograd already gives dF/dt_original via chain rule.
+        res = (F_t
                - r * F
                + (r - 0.5 * V) * S * F_S
                + kappa * (theta - V) * F_V
