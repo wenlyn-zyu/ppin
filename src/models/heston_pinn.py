@@ -151,29 +151,30 @@ class Heston_PINN:
 
     def _trial(self, S, v, tau):
         """
-        U_theta = A(S,v,tau) + S_n*tau_n * NN(S,v,tau)
-        B = S_n*tau_n vanishes at tau=0 (terminal) and S=0 (lower boundary).
-        Using normalised B keeps the MainNet contribution O(1) for stable training.
+        Networks output normalised price u = U/K.
+        Trial solution: u = A(S_n,v_n,tau_n) + S_n*tau_n * NN(S_n,v_n,tau_n)
+        B = S_n*tau_n vanishes at tau=0 and S=0, hard-encoding Dirichlet BCs.
+        Working in u=U/K units keeps all loss terms O(1) regardless of K.
         """
         S_n, v_n, tau_n = self._normalise(S, v, tau)
         A = self.aux_net(S_n, v_n, tau_n)
         N = self.main_net(S_n, v_n, tau_n)
         B = S_n * tau_n
-        return A + B * N
+        return A + B * N   # returns u = U/K
 
     def _pretrain_aux(self, epochs=3000, n=5000, lr=5e-3):
-        """Pre-train aux_net on Dirichlet BCs only."""
+        """Pre-train aux_net on Dirichlet BCs in normalised u=U/K units."""
         opt = torch.optim.Adam(self.aux_net.parameters(), lr=lr)
         for ep in range(1, epochs + 1):
             opt.zero_grad()
-            # terminal: tau=0
+            # terminal: tau=0, target = max(S/K - 1, 0)
             S_T   = self._to(torch.FloatTensor(n, 1).uniform_(0, self.S_max))
             v_T   = self._to(torch.FloatTensor(n, 1).uniform_(0, self.v_max))
             tau_T = self._to(torch.zeros(n, 1))
             S_n, v_n, tau_n = self._normalise(S_T, v_T, tau_T)
-            loss_T = torch.mean((self.aux_net(S_n, v_n, tau_n)
-                                 - torch.clamp(S_T - self.K, min=0.0)) ** 2)
-            # lower boundary: S=0
+            target_T = torch.clamp(S_T / self.K - 1.0, min=0.0)
+            loss_T = torch.mean((self.aux_net(S_n, v_n, tau_n) - target_T) ** 2)
+            # lower boundary: S=0, target = 0
             S_0   = self._to(torch.zeros(n, 1))
             v_0   = self._to(torch.FloatTensor(n, 1).uniform_(0, self.v_max))
             tau_0 = self._to(torch.FloatTensor(n, 1).uniform_(0, self.T))
@@ -188,30 +189,31 @@ class Heston_PINN:
 
     def _pde_residual(self, S, v, tau):
         """
-        Heston PDE in backward time tau = T - t:
-          dU/dtau = 0.5*v*S^2*U_SS + rho*xi*v*S*U_Sv + 0.5*xi^2*v*U_vv
-                  + r*S*U_S + kappa*(theta-v)*U_v - r*U
+        Heston PDE for u = U/K in backward time tau = T - t.
+        Dividing by K makes the PDE scale-invariant: same form as K=1 paper.
+          du/dtau = 0.5*v*S^2*u_SS + rho*xi*v*S*u_Sv + 0.5*xi^2*v*u_vv
+                  + r*S*u_S + kappa*(theta-v)*u_v - r*u
         """
         S.requires_grad_(True)
         v.requires_grad_(True)
         tau.requires_grad_(True)
-        U = self._trial(S, v, tau)
+        u = self._trial(S, v, tau)   # u = U/K, O(1)
 
-        ones = torch.ones_like(U)
-        U_tau = torch.autograd.grad(U, tau, grad_outputs=ones, create_graph=True)[0]
-        U_S   = torch.autograd.grad(U, S,   grad_outputs=ones, create_graph=True)[0]
-        U_v   = torch.autograd.grad(U, v,   grad_outputs=ones, create_graph=True)[0]
-        U_SS  = torch.autograd.grad(U_S, S, grad_outputs=torch.ones_like(U_S), create_graph=True)[0]
-        U_vv  = torch.autograd.grad(U_v, v, grad_outputs=torch.ones_like(U_v), create_graph=True)[0]
-        U_Sv  = torch.autograd.grad(U_S, v, grad_outputs=torch.ones_like(U_S), create_graph=True)[0]
+        ones = torch.ones_like(u)
+        u_tau = torch.autograd.grad(u, tau, grad_outputs=ones, create_graph=True)[0]
+        u_S   = torch.autograd.grad(u, S,   grad_outputs=ones, create_graph=True)[0]
+        u_v   = torch.autograd.grad(u, v,   grad_outputs=ones, create_graph=True)[0]
+        u_SS  = torch.autograd.grad(u_S, S, grad_outputs=torch.ones_like(u_S), create_graph=True)[0]
+        u_vv  = torch.autograd.grad(u_v, v, grad_outputs=torch.ones_like(u_v), create_graph=True)[0]
+        u_Sv  = torch.autograd.grad(u_S, v, grad_outputs=torch.ones_like(u_S), create_graph=True)[0]
 
-        res = (U_tau
-               - 0.5 * v * S ** 2 * U_SS
-               - self.rho * self.xi * v * S * U_Sv
-               - 0.5 * self.xi ** 2 * v * U_vv
-               - self.r * S * U_S
-               - self.kappa * (self.theta - v) * U_v
-               + self.r * U)
+        res = (u_tau
+               - 0.5 * v * S ** 2 * u_SS
+               - self.rho * self.xi * v * S * u_Sv
+               - 0.5 * self.xi ** 2 * v * u_vv
+               - self.r * S * u_S
+               - self.kappa * (self.theta - v) * u_v
+               + self.r * u)
         return res
 
     def train(self, epochs=20000, log_every=2000,
@@ -221,7 +223,7 @@ class Heston_PINN:
         Train following paper protocol:
           1. Pre-train aux_net on Dirichlet BCs (freeze after)
           2. Adam + StepLR (gamma=0.75, step=5000)
-          3. Loss = L_pde + L_Smax + L_vmax + L_deg
+          3. Loss = L_pde + L_Smax + L_vmax + L_deg  (all in u=U/K units, O(1))
         """
         print("Pre-training auxiliary network on Dirichlet BCs...")
         self._pretrain_aux(epochs=pretrain_epochs, lr=lr)
@@ -240,44 +242,44 @@ class Heston_PINN:
             tau_r = self._to(torch.FloatTensor(n_r, 1).uniform_(0, self.T))
             loss_pde = torch.mean(self._pde_residual(S_r, v_r, tau_r) ** 2)
 
-            # Neumann at S=S_max: dU/dS = 1
-            S_sm   = self._to(torch.full((n_bc, 1), self.S_max, requires_grad=True))
+            # Neumann at S=S_max: du/dS = 1/K  (since u=U/K, dU/dS=1 => du/dS=1/K)
+            S_sm   = self._to(torch.full((n_bc, 1), self.S_max))
             v_sm   = self._to(torch.FloatTensor(n_bc, 1).uniform_(0, self.v_max))
             tau_sm = self._to(torch.FloatTensor(n_bc, 1).uniform_(0, self.T))
             S_sm   = S_sm.detach().requires_grad_(True)
-            U_sm   = self._trial(S_sm, v_sm, tau_sm)
-            dU_dS  = torch.autograd.grad(U_sm, S_sm,
-                                         grad_outputs=torch.ones_like(U_sm),
+            u_sm   = self._trial(S_sm, v_sm, tau_sm)
+            du_dS  = torch.autograd.grad(u_sm, S_sm,
+                                         grad_outputs=torch.ones_like(u_sm),
                                          create_graph=True)[0]
-            loss_Smax = torch.mean((dU_dS - 1.0) ** 2)
+            loss_Smax = torch.mean((du_dS - 1.0 / self.K) ** 2)
 
-            # Neumann at v=v_max: dU/dv = 0
+            # Neumann at v=v_max: du/dv = 0
             S_vm   = self._to(torch.FloatTensor(n_bc, 1).uniform_(0, self.S_max))
-            v_vm   = self._to(torch.full((n_bc, 1), self.v_max)).requires_grad_(True)
+            v_vm   = self._to(torch.full((n_bc, 1), self.v_max))
             tau_vm = self._to(torch.FloatTensor(n_bc, 1).uniform_(0, self.T))
             v_vm   = v_vm.detach().requires_grad_(True)
-            U_vm   = self._trial(S_vm, v_vm, tau_vm)
-            dU_dv  = torch.autograd.grad(U_vm, v_vm,
-                                         grad_outputs=torch.ones_like(U_vm),
+            u_vm   = self._trial(S_vm, v_vm, tau_vm)
+            du_dv  = torch.autograd.grad(u_vm, v_vm,
+                                         grad_outputs=torch.ones_like(u_vm),
                                          create_graph=True)[0]
-            loss_vmax = torch.mean(dU_dv ** 2)
+            loss_vmax = torch.mean(du_dv ** 2)
 
-            # degenerate BC at v=0: S*dU/dS + kappa*theta*dU/dv - r*U - dU/dtau = 0
+            # degenerate BC at v=0: S*du/dS + kappa*theta*du/dv - r*u - du/dtau = 0
             S_dg   = self._to(torch.FloatTensor(n_bc, 1).uniform_(0, self.S_max))
             v_dg   = self._to(torch.full((n_bc, 1), 1e-6))
             tau_dg = self._to(torch.FloatTensor(n_bc, 1).uniform_(0, self.T))
             S_dg   = S_dg.detach().requires_grad_(True)
             v_dg   = v_dg.detach().requires_grad_(True)
             tau_dg = tau_dg.detach().requires_grad_(True)
-            U_dg   = self._trial(S_dg, v_dg, tau_dg)
-            ones_d = torch.ones_like(U_dg)
-            dU_dS_d   = torch.autograd.grad(U_dg, S_dg,   grad_outputs=ones_d, create_graph=True)[0]
-            dU_dv_d   = torch.autograd.grad(U_dg, v_dg,   grad_outputs=ones_d, create_graph=True)[0]
-            dU_dtau_d = torch.autograd.grad(U_dg, tau_dg, grad_outputs=ones_d, create_graph=True)[0]
-            deg_res = (S_dg * dU_dS_d
-                       + self.kappa * self.theta * dU_dv_d
-                       - self.r * U_dg
-                       - dU_dtau_d)
+            u_dg   = self._trial(S_dg, v_dg, tau_dg)
+            ones_d = torch.ones_like(u_dg)
+            du_dS_d   = torch.autograd.grad(u_dg, S_dg,   grad_outputs=ones_d, create_graph=True)[0]
+            du_dv_d   = torch.autograd.grad(u_dg, v_dg,   grad_outputs=ones_d, create_graph=True)[0]
+            du_dtau_d = torch.autograd.grad(u_dg, tau_dg, grad_outputs=ones_d, create_graph=True)[0]
+            deg_res = (S_dg * du_dS_d
+                       + self.kappa * self.theta * du_dv_d
+                       - self.r * u_dg
+                       - du_dtau_d)
             loss_deg = torch.mean(deg_res ** 2)
 
             loss = loss_pde + loss_Smax + loss_vmax + loss_deg
@@ -295,7 +297,7 @@ class Heston_PINN:
                       f"deg={loss_deg.item():.4e}")
 
     def price(self, S, v=None, t=0.0):
-        """Price at calendar time t (tau = T - t)."""
+        """Price at calendar time t (tau = T - t). Returns U = K * u."""
         if v is None:
             v = self.v0
         tau = self.T - t
@@ -305,7 +307,8 @@ class Heston_PINN:
             S_t   = self._to(torch.tensor([[float(S)]],   dtype=torch.float32))
             v_t   = self._to(torch.tensor([[float(v)]],   dtype=torch.float32))
             tau_t = self._to(torch.tensor([[float(tau)]], dtype=torch.float32))
-            return self._trial(S_t, v_t, tau_t).item()
+            u = self._trial(S_t, v_t, tau_t).item()
+            return self.K * u   # convert u=U/K back to absolute price
 
     def save(self, path):
         torch.save({
