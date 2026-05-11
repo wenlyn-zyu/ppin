@@ -229,19 +229,42 @@ class Heston_PINN:
                + self.r * u)
         return res
 
+    def _build_data_anchors(self, n_data=50):
+        """
+        Pre-compute semi-analytical Heston prices at tau=T (t=0) as data anchors.
+        Returns (S_anchors, v_anchors, u_anchors) tensors on self.device.
+        Uses v=v0 and S uniformly spaced in [0.2*K, 3*K] to cover ATM well.
+        """
+        S_vals = np.linspace(0.2 * self.K, 3.0 * self.K, n_data)
+        u_vals = np.array([
+            heston_call_price(s, self.K, self.T, self.r,
+                              self.kappa, self.theta, self.xi, self.rho, self.v0)
+            / self.K
+            for s in S_vals
+        ])
+        S_t = self._to(torch.tensor(S_vals, dtype=torch.float32).unsqueeze(1))
+        v_t = self._to(torch.full((n_data, 1), self.v0, dtype=torch.float32))
+        u_t = self._to(torch.tensor(u_vals, dtype=torch.float32).unsqueeze(1))
+        return S_t, v_t, u_t
+
     def train(self, epochs=20000, log_every=2000,
               n_r=10000, n_bc=500, lr=1e-3,
-              pretrain_epochs=3000):
+              pretrain_epochs=3000, w_data=100.0):
         """
         Train following paper protocol:
-          1. Pre-train aux_net on Dirichlet BCs (freeze after)
+          1. Pre-train aux_net (freeze after)
           2. Adam + StepLR (gamma=0.75, step=5000)
-          3. Loss = L_pde + L_Smax + L_vmax + L_deg  (all in u=U/K units, O(1))
+          3. Loss = L_pde + L_Smax + L_vmax + L_deg + w_data*L_data
+          L_data: semi-analytical anchors at tau=T (t=0) to pin the solution
         """
-        print("Pre-training auxiliary network on Dirichlet BCs...")
+        print("Pre-training auxiliary network...")
         self._pretrain_aux(epochs=pretrain_epochs, lr=lr)
         for p in self.aux_net.parameters():
             p.requires_grad_(False)
+
+        print("Building semi-analytical data anchors at t=0...")
+        S_anc, v_anc, u_anc = self._build_data_anchors(n_data=50)
+        tau_anc = self._to(torch.full((50, 1), self.T, dtype=torch.float32))
 
         opt = torch.optim.Adam(self.main_net.parameters(), lr=lr)
         sched = torch.optim.lr_scheduler.StepLR(opt, step_size=5000, gamma=0.75)
@@ -255,7 +278,7 @@ class Heston_PINN:
             tau_r = self._to(torch.FloatTensor(n_r, 1).uniform_(0, self.T))
             loss_pde = torch.mean(self._pde_residual(S_r, v_r, tau_r) ** 2)
 
-            # Neumann at S=S_max: du/dS = 1/K  (since u=U/K, dU/dS=1 => du/dS=1/K)
+            # Neumann at S=S_max: du/dS = 1/K
             S_sm   = self._to(torch.full((n_bc, 1), self.S_max))
             v_sm   = self._to(torch.FloatTensor(n_bc, 1).uniform_(0, self.v_max))
             tau_sm = self._to(torch.FloatTensor(n_bc, 1).uniform_(0, self.T))
@@ -277,7 +300,7 @@ class Heston_PINN:
                                          create_graph=True)[0]
             loss_vmax = torch.mean(du_dv ** 2)
 
-            # degenerate BC at v=0: S*du/dS + kappa*theta*du/dv - r*u - du/dtau = 0
+            # degenerate BC at v=0
             S_dg   = self._to(torch.FloatTensor(n_bc, 1).uniform_(0, self.S_max))
             v_dg   = self._to(torch.full((n_bc, 1), 1e-6))
             tau_dg = self._to(torch.FloatTensor(n_bc, 1).uniform_(0, self.T))
@@ -295,7 +318,11 @@ class Heston_PINN:
                        - du_dtau_d)
             loss_deg = torch.mean(deg_res ** 2)
 
-            loss = loss_pde + loss_Smax + loss_vmax + loss_deg
+            # data anchors at tau=T: semi-analytical prices pin the solution
+            u_pred_anc = self._trial(S_anc, v_anc, tau_anc)
+            loss_data = torch.mean((u_pred_anc - u_anc) ** 2)
+
+            loss = loss_pde + loss_Smax + loss_vmax + loss_deg + w_data * loss_data
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.main_net.parameters(), 1.0)
             opt.step()
@@ -307,7 +334,8 @@ class Heston_PINN:
                       f"pde={loss_pde.item():.4e}  "
                       f"Smax={loss_Smax.item():.4e}  "
                       f"vmax={loss_vmax.item():.4e}  "
-                      f"deg={loss_deg.item():.4e}")
+                      f"deg={loss_deg.item():.4e}  "
+                      f"data={loss_data.item():.4e}")
 
     def price(self, S, v=None, t=0.0):
         """Price at calendar time t (tau = T - t). Returns U = K * u."""

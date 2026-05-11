@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--n_r",             type=int,   default=10000)
     parser.add_argument("--n_bc",            type=int,   default=500)
     parser.add_argument("--lr",              type=float, default=1e-3)
+    parser.add_argument("--w_data",          type=float, default=100.0)
     parser.add_argument("--out",             type=str,   default="results/heston_icpinn.pt")
     args = parser.parse_args()
 
@@ -59,6 +60,7 @@ def main():
         n_r=args.n_r,
         n_bc=args.n_bc,
         lr=args.lr,
+        w_data=args.w_data,
         log_every=2000,
     )
 
