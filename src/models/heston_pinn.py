@@ -151,13 +151,14 @@ class Heston_PINN:
 
     def _trial(self, S, v, tau):
         """
-        U_theta = A(S,v,tau) + S*tau * NN(S,v,tau)
-        B = S*tau vanishes at tau=0 (terminal) and S=0 (lower boundary).
+        U_theta = A(S,v,tau) + S_n*tau_n * NN(S,v,tau)
+        B = S_n*tau_n vanishes at tau=0 (terminal) and S=0 (lower boundary).
+        Using normalised B keeps the MainNet contribution O(1) for stable training.
         """
         S_n, v_n, tau_n = self._normalise(S, v, tau)
         A = self.aux_net(S_n, v_n, tau_n)
         N = self.main_net(S_n, v_n, tau_n)
-        B = S * tau
+        B = S_n * tau_n
         return A + B * N
 
     def _pretrain_aux(self, epochs=3000, n=5000, lr=5e-3):
