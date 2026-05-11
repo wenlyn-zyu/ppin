@@ -37,13 +37,13 @@ PINN 用神经网络 $\hat{V}_\theta(x, t)$ 近似真实解 $V(x, t)$，通过�
 \end{align}
 配点 $\{(x_i, t_i)\}_{i=1}^{N_c}$ 在求解域内随机采样，无需网格剖分。PDE 残差通过自动微分（automatic differentiation）精确计算。
 
-\subsection{硬约束终值条件（ICPINN）}
+\subsection{硬约束边界条件（ICPINN）}
 
-软约束方式将终值条件纳入损失函数，网络只能近似满足。参考 Guo 等人\citep{guo2024icpinn}的 ICPINN 方法，对 Heston 模型采用输出变换将终值条件硬编码：
+软约束方式将边界条件纳入损失函数，网络只能近似满足。参考 Tan 和 Zhang\citep{guo2024icpinn} 的 ICPINN 方法，对 Heston 模型采用双网络试探解将 Dirichlet 边界条件硬编码：
 \begin{equation}\label{eq:hard_constraint}
-  \hat{V}_\theta(S, v, t) = \phi(S) + (T - t)\cdot\text{net}_\theta(S, v, t).
+  \hat{V}(S, v, \tau) = A(S, v, \tau) + S\tau \cdot \text{NN}(S, v, \tau;\, \theta),
 \end{equation}
-当 $t = T$ 时，$(T-t) = 0$，故 $\hat{V}_\theta(S, v, T) = \phi(S)$ 精确成立，无需在损失函数中加入 $\mathcal{L}_\text{ic}$ 项。
+其中 $\tau = T - t$ 为倒向时间，$A$ 为预训练辅助网络，$\text{NN}$ 为主网络。乘子 $B = S\tau$ 在 $\tau = 0$（终值时刻）和 $S = 0$（下边界）处均为零，因此 $\hat{V}$ 在这两处精确等于 $A$，而 $A$ 已被预训练为满足式~\eqref{eq:aux_terminal}--\eqref{eq:aux_lower}。这一构造使终值条件和下边界条件精确成立，无需在损失函数中加入对应的软约束项。
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{网络架构}\label{sec:architecture}
@@ -60,31 +60,45 @@ BSM 和 CEV 模型采用门控网络结构\citep{dhiman2023pinn}，由浅层分�
 \end{align}
 其中 $\sigma(\cdot)$ 为 sigmoid 函数，$\odot$ 为逐元素乘法，$g \in (0,1)$ 为门控权重。浅层分支（1 个隐藏层，64 个神经元）捕捉期权价格的线性部分（深度实值/虚值区域），深层分支（4 个隐藏层，64 个神经元）捕捉平值附近的非线性特征。激活函数均为 $\tanh$。
 
-\subsection{深层全连接网络（Heston）}
+\subsection{ICPINN 双网络架构（Heston）}
 
-Heston 模型输入维度为 3（$S, v, t$），采用对数价格变换与 Fourier 特征嵌入的改进架构，并结合式~\eqref{eq:hard_constraint}~的硬约束输出变换。
+Heston 模型采用 Tan 和 Zhang\citep{guo2024icpinn} 提出的 ICPINN 双网络架构，由辅助网络（AuxNet）和主网络（MainNet）组成，通过试探解（trial solution）将 Dirichlet 边界条件硬编码进网络结构。
 
-\textbf{对数价格变换}：将股价输入从 $S \in [0, S_\max]$ 变换为对数坐标 $x = \ln(S/K)$，使 PDE 扩散项从 $\frac{1}{2}vS^2 V_{SS}$ 变为 $\frac{1}{2}v V_{xx}$，消除了 $S^2$ 量级失衡。在对数坐标下，Heston PDE 变为：
-\begin{equation}\label{eq:heston_logprice}
-  \frac{\partial V}{\partial t}
-  + \frac{1}{2}v\frac{\partial^2 V}{\partial x^2}
-  + \left(r - \frac{1}{2}v\right)\frac{\partial V}{\partial x}
-  + \rho\xi v\frac{\partial^2 V}{\partial x\partial v}
-  + \frac{1}{2}\xi^2 v\frac{\partial^2 V}{\partial v^2}
-  + \kappa(\theta-v)\frac{\partial V}{\partial v}
-  - rV = 0.
+\textbf{试探解}：令 $\tau = T - t$ 为倒向时间，定义试探解为：
+\begin{equation}\label{eq:trial_solution}
+  \hat{V}(S, v, \tau) = A(S, v, \tau) + S\tau \cdot \text{NN}(S, v, \tau),
 \end{equation}
+其中 $B(S,v,\tau) = S\tau$ 在 $\tau=0$（终值时刻）和 $S=0$（下边界）处均为零，因此 $\hat{V}$ 在这两处自动等于 $A$。辅助网络 $A$ 预训练后冻结，使其精确满足：
+\begin{align}
+  A(S, v, 0) &= \max(S - K,\, 0), \label{eq:aux_terminal} \\
+  A(0, v, \tau) &= 0. \label{eq:aux_lower}
+\end{align}
+由此，试探解在终值条件和下边界处精确成立，无需在损失函数中加入对应的软约束项。
 
-\textbf{Fourier 特征嵌入}：在输入层加入随机 Fourier 特征映射 $\gamma(x) = [\sin(Bx), \cos(Bx)]$（$B \in \mathbb{R}^{3 \times n_f}$ 为随机矩阵，$n_f=16$），提升网络对高频分量的表达能力，有助于捕捉平值附近的非线性特征。
+\textbf{辅助网络（AuxNet）}：3 个隐藏层，每层 40 个神经元，激活函数为 ELU。ELU 在零点处光滑（与 ReLU 不同），有助于拟合 $\max(S-K,0)$ 在 $S=K$ 处的折点。预训练完成后参数冻结，不参与主训练阶段的梯度更新。
 
-\textbf{网络结构}：8 层全连接网络，每层 128 个神经元，激活函数为 $\tanh$，输入为 Fourier 嵌入后的 32 维特征向量。
+\textbf{主网络（MainNet）}：8 个隐藏层，每层 40 个神经元，激活函数为 $\tanh$，权重采用 Glorot 正态初始化。输入为归一化后的 $(\tilde{S}, \tilde{v}, \tilde{\tau}) \in [0,1]^3$。
 
-\textbf{自适应损失权重}：训练过程中每 1000 步根据各损失项的梯度范数动态调整权重（Wang 等人\citep{wang2022ntk}），防止边界条件损失被 PDE 残差损失淹没：
-\begin{equation}
-  w_i \leftarrow \frac{\sum_j \|\nabla_\theta \mathcal{L}_j\|}{\|\nabla_\theta \mathcal{L}_i\|}.
+\textbf{损失函数}：主训练阶段仅优化主网络参数，损失由四项组成：
+\begin{equation}\label{eq:heston_loss}
+  \mathcal{L} = \mathcal{L}_\text{pde} + \mathcal{L}_{S_\max} + \mathcal{L}_{v_\max} + \mathcal{L}_\text{deg},
 \end{equation}
+其中：
+\begin{itemize}
+  \item $\mathcal{L}_\text{pde}$：$N_r = 10000$ 个内部配点处的 Heston PDE 残差均方误差；
+  \item $\mathcal{L}_{S_\max}$：$S = S_\max$ 处的 Neumann 条件 $\partial \hat{V}/\partial S = 1$（深度实值近似）；
+  \item $\mathcal{L}_{v_\max}$：$v = v_\max$ 处的 Neumann 条件 $\partial \hat{V}/\partial v = 0$（高波动率饱和）；
+  \item $\mathcal{L}_\text{deg}$：$v = 0$ 处的 Fichera 退化边界条件（见下文），每类边界各取 $N_\text{bc} = 500$ 个配点。
+\end{itemize}
 
-\textbf{RAR 自适应采样}：每 2000 步根据当前 PDE 残差大小，在高残差区域（深度虚值 $S \ll K$）补充配点，强制网络关注接近零的期权价格区域（Lu 等人\citep{lu2021deepxde}）。
+\textbf{Fichera 退化边界条件}：当 $v \to 0$ 时，Heston PDE 中的扩散项消失，方程退化为一阶 PDE。Fichera 理论指出此时不应施加 Dirichlet 条件，而应令退化后的方程在 $v=0$ 处成立：
+\begin{equation}\label{eq:fichera}
+  S\frac{\partial \hat{V}}{\partial S} + \kappa\theta\frac{\partial \hat{V}}{\partial v}
+  - r\hat{V} - \frac{\partial \hat{V}}{\partial \tau} = 0, \quad v = 0.
+\end{equation}
+这一条件由 Heston PDE 在 $v=0$ 处令所有含 $v$ 的扩散项为零直接得到，物理上对应零波动率时期权价格满足确定性折现方程。
+
+\textbf{求解域}：$S \in [0, S_\max]$，$S_\max = 4K$；$v \in [0, v_\max]$，$v_\max = 1$；$\tau \in [0, T]$。取 $S_\max = 4K$ 而非更大值，是为了避免 $S^2$ 量级在 PDE 扩散项中造成梯度失衡。
 
 \subsection{输入归一化}
 
@@ -214,24 +228,25 @@ CEV 模型的适用场景为个股期权，尤其是财务杠杆较高或股价�
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Heston-PINN}\label{sec:heston_pinn}
 
-Heston 模型的 PDE 算子为：
+Heston 模型的 PDE 算子（倒向时间 $\tau = T - t$）为：
 \begin{equation}
   \mathcal{F}_\text{Heston}[V] =
-    \frac{\partial V}{\partial t}
-    + \frac{1}{2}vS^2\frac{\partial^2 V}{\partial S^2}
-    + \rho\xi vS\frac{\partial^2 V}{\partial S\partial v}
-    + \frac{1}{2}\xi^2 v\frac{\partial^2 V}{\partial v^2}
-    + rS\frac{\partial V}{\partial S}
-    + \kappa(\theta-v)\frac{\partial V}{\partial v}
-    - rV.
+    \frac{\partial V}{\partial \tau}
+    - \frac{1}{2}vS^2\frac{\partial^2 V}{\partial S^2}
+    - \rho\xi vS\frac{\partial^2 V}{\partial S\partial v}
+    - \frac{1}{2}\xi^2 v\frac{\partial^2 V}{\partial v^2}
+    - rS\frac{\partial V}{\partial S}
+    - \kappa(\theta-v)\frac{\partial V}{\partial v}
+    + rV = 0.
 \end{equation}
 边界条件设置为：
 \begin{align}
-  V(0, v, t) &= 0, \\
-  V(S_\max, v, t) &= S_\max - Ke^{-r(T-t)}, \\
-  V(S, v_\max, t) &\approx S.
+  V(S, v, 0) &= \max(S - K,\, 0), \quad \text{（终值条件，由 ICPINN 硬编码）} \\
+  V(0, v, \tau) &= 0, \quad \text{（下边界，由 ICPINN 硬编码）} \\
+  \frac{\partial V}{\partial S}\bigg|_{S=S_\max} &= 1, \quad \text{（Neumann，深度实值近似）} \\
+  \frac{\partial V}{\partial v}\bigg|_{v=v_\max} &= 0, \quad \text{（Neumann，高波动率饱和）}
 \end{align}
-当 $v \to v_\max$ 时，极高波动率下期权价值趋近于标的资产价格本身。
+以及 $v=0$ 处的 Fichera 退化条件（式~\eqref{eq:fichera}）。求解域取 $S_\max = 4K$，$v_\max = 1$。
 
 Heston 模型具有半解析解（特征函数方法），本文用其作为验证基准：
 \begin{equation}
@@ -289,4 +304,4 @@ LLM 接收用户的自然语言输入，输出结构化 JSON 参数：
 % ─────────────────────────────────────────────────────────────────────────────
 \section{本章小结}\label{sec:method_summary}
 
-本章介绍了基于 PINN 与 LLM 的统一期权定价框架。在 PINN 部分，三大模型共用统一的损失函数结构，Heston 模型额外采用 ICPINN 硬约束确保终值条件精确满足；在网络架构上，BSM/CEV 使用门控网络，Heston 使用深层全连接网络。在 LLM 部分，路由层通过结构化输出实现可靠的参数提取和模型选择。下一章将报告三大模型的实验结果。
+本章介绍了基于 PINN 与 LLM 的统一期权定价框架。在 PINN 部分，三大模型共用统一的损失函数结构；Heston 模型采用 ICPINN 双网络架构，辅助网络预训练后冻结以精确满足终值条件和下边界条件，主网络通过四项损失（PDE 残差、两个 Neumann 条件、Fichera 退化边界条件）训练，求解域取 $S_\max = 4K$ 以避免量级失衡；BSM/CEV 使用门控网络。在 LLM 部分，路由层通过结构化输出实现可靠的参数提取和模型选择。下一章将报告三大模型的实验结果。
